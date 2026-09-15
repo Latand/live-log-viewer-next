@@ -237,18 +237,20 @@ for (const mode of ["off", "sqlite"] as const) {
       host: receipt.host,
     }, revision, starting.migration!.operationId, receipt);
 
+    /* An attempted delivery is never carried (#1709): it ends failed, payload kept, and stays that way. */
     const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: mode });
     expect(reopened.snapshot().heldDeliveries[held.id]).toMatchObject({
       state: "failed",
       attempts: 1,
+      text: "fixture",
       generationId: null,
       deliveredAt: null,
-      error: expect.stringContaining("migration committed"),
+      error: expect.stringContaining("switch committed after a delivery attempt"),
     });
     expect(reopened.recordDeliveryOutcomeForOperation(id, held.command.operationId, "delivered")).toBeNull();
     expect(reopened.recordDeliveryOutcome(held.id, "delivered")).toMatchObject({
       state: "failed",
-      error: expect.stringContaining("migration committed"),
+      error: expect.stringContaining("switch committed after a delivery attempt"),
     });
   });
 }
@@ -574,7 +576,7 @@ test("stopping a migration records that an uncertain delivery may already have l
   });
 });
 
-test("a successful migration preserves both prior and fenced prompts as cancelled evidence", () => {
+test("a successful migration carries both an unattempted prior prompt and a fenced prompt to its successor, payload intact (#1709)", () => {
   const { store, id } = seededRegistry("off", registryFile());
   const source = store.conversation(id)!.generations.at(-1)!;
   const predecessorOwned = store.holdDelivery(id, "old owner payload", "old-owner-prompt");
@@ -595,16 +597,19 @@ test("a successful migration preserves both prior and fenced prompts as cancelle
 
   expect(committed.migration).toMatchObject({ phase: "committed" });
   expect(store.snapshot().heldDeliveries[predecessorOwned.id]).toMatchObject({
-    state: "failed",
-    generationId: null,
-    text: "",
-    error: expect.stringContaining("migration committed"),
+    state: "assigned",
+    generationId: receipt.nativeId,
+    text: "old owner payload",
+    attempts: 0,
+    error: null,
   });
   expect(store.snapshot().heldDeliveries[fenced.id]).toMatchObject({
-    state: "failed",
-    generationId: null,
-    text: "",
-    error: expect.stringContaining("migration committed"),
+    state: "assigned",
+    generationId: receipt.nativeId,
+    text: "fenced payload",
+    attempts: 0,
+    fencedBy: null,
+    error: null,
   });
   expect(store.conversation(id)?.generations).toMatchObject([
     { id: source.id, archivedAt: expect.any(String) },

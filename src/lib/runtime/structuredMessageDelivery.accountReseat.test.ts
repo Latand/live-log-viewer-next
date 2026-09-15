@@ -460,10 +460,11 @@ async function expectWaitingTurnReseatRestart(
   await drainHeldDeliveries(conversation.id, delivery, restarted);
   await drainHeldDeliveries(conversation.id, delivery, restarted);
 
+  /* #1709: the held message was never attempted, so the switch carries it and the drain delivers it once. */
   expect({ predecessorCommands, successorCreates, successorDeliveries }).toEqual({
     predecessorCommands: 0,
     successorCreates: 1,
-    successorDeliveries: [],
+    successorDeliveries: [clientMessageId],
   });
   expect(restarted.conversation(conversation.id)).toMatchObject({
     id: conversation.id,
@@ -473,20 +474,16 @@ async function expectWaitingTurnReseatRestart(
       { id: successorId, path: successorPath, accountId: "seat-active", archivedAt: null },
     ],
   });
-  expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
-    clientMessageId,
-    state: "failed",
-    text: "",
-    generationId: null,
-    error: expect.stringContaining("migration committed"),
-  }]);
+  expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+  expect(Object.values(restarted.snapshot().heldDeliveries).filter((item) => item.clientMessageId === clientMessageId))
+    .toMatchObject([{ state: "delivered", generationId: successorId, attempts: 1 }]);
 }
 
-test("a newly admitted busy-turn reseat stays held through restart and becomes cancelled evidence", async () => {
+test("a newly admitted busy-turn reseat stays held through restart and is delivered once on the successor", async () => {
   await expectWaitingTurnReseatRestart("busy");
 });
 
-test("a newly admitted unknown-turn reseat stays held through restart and becomes cancelled evidence", async () => {
+test("a newly admitted unknown-turn reseat stays held through restart and is delivered once on the successor", async () => {
   await expectWaitingTurnReseatRestart("unknown");
 });
 
@@ -895,7 +892,7 @@ test("an explicit migration opt-out keeps a synchronization hold assigned to the
   expect(sourceDeliveries).toEqual(["synchronization-opted-out-send"]);
 });
 
-test("a fresh empty-turn prompt on a draining source account becomes cancelled evidence", async () => {
+test("a fresh empty-turn prompt on a draining source account is delivered once on the successor", async () => {
   const { registry, conversation } = registryWithConversation("seat-source", "codex", "unknown", "empty");
   registry.setEngineRouting("codex", "seat-active");
   let predecessorCommands = 0;
@@ -943,17 +940,13 @@ test("a fresh empty-turn prompt on a draining source account becomes cancelled e
   await drainHeldDeliveries(conversation.id, port, registry);
   await drainHeldDeliveries(conversation.id, port, registry);
 
+  /* #1709: never attempted, so the committing switch carries it to the successor. */
   expect({ successorCreates, delivered }).toEqual({
     successorCreates: 1,
-    delivered: [],
+    delivered: ["fresh-empty-turn-send"],
   });
   expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
-  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
-    clientMessageId: "fresh-empty-turn-send",
-    state: "failed",
-    text: "",
-    error: expect.stringContaining("migration committed"),
-  }]);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
 test("a post-rollback held delivery re-arms when the restored source host returns", async () => {
@@ -1089,7 +1082,7 @@ test("an exact retry reuses one account migration and one held delivery", async 
   }]);
 });
 
-test("restart preserves one Viewer conversation and retains old held input as cancelled evidence", async () => {
+test("restart preserves one Viewer conversation and delivers its held input once on the successor", async () => {
   const { registry, conversation } = registryWithConversation();
   registry.setEngineRouting("codex", "seat-active");
   const sourceGeneration = conversation.generations.at(-1)!;
@@ -1163,17 +1156,16 @@ test("restart preserves one Viewer conversation and retains old held input as ca
   await drainHeldDeliveries(conversation.id, delivery, restarted);
   await drainHeldDeliveries(conversation.id, delivery, restarted);
 
-  expect(delivered).toEqual([]);
+  expect(delivered).toEqual(["restart-safe-account-reseat"]);
   expect(Object.values(restarted.snapshot().heldDeliveries)).toMatchObject([{
     clientMessageId: "restart-safe-account-reseat",
-    state: "failed",
-    text: "",
-    generationId: null,
-    error: expect.stringContaining("migration committed"),
+    state: "delivered",
+    generationId: successorId,
+    attempts: 1,
   }]);
 });
 
-test("controller startup retry publishes one selected-account successor and cancels held input for both engines", async () => {
+test("controller startup retry publishes one selected-account successor and delivers held input once for both engines", async () => {
   for (const engine of ["claude", "codex"] as const) {
     const { registry, conversation } = registryWithConversation("seat-source", engine);
     registry.setEngineRouting(engine, "seat-active");
@@ -1247,14 +1239,9 @@ test("controller startup retry publishes one selected-account successor and canc
     expect({ creates, publications, delivered }).toEqual({
       creates: 1,
       publications: 2,
-      delivered: [],
+      delivered: [clientMessageId],
     });
     expect(controllerReady.conversation(conversation.id)?.migration?.phase).toBe("committed");
-    expect(controllerReady.pendingDeliveries(conversation.id)).toMatchObject([{
-      clientMessageId,
-      state: "failed",
-      text: "",
-      error: expect.stringContaining("migration committed"),
-    }]);
+    expect(controllerReady.pendingDeliveries(conversation.id)).toEqual([]);
   }
 });

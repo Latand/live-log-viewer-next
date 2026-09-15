@@ -20,6 +20,7 @@ import {
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
+import { withConversationActuation } from "@/lib/deliveryActuation";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
 import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptTurnResult } from "@/lib/scanner/activity";
@@ -970,21 +971,24 @@ export async function drainHeldDeliveries(
       registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
       return;
     }
-    const claimed = reconciling ? item : registry.beginDeliveryAttempt(item.id, current.id);
-    if (!claimed) return;
-    const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
-    try {
-      const input = { delivery: claimed, path: current.path, clientMessageId };
-      const outcome = reconciling
-        ? await delivery.reconcileUncertain!(input)
-        : await delivery.deliver(input);
-      if (outcome === "held") {
-        if (!reconciling) registry.requeueUnactuatedDelivery(claimed.id);
+    /* #1709: a claim and its delivery run in the conversation's actuation section, like every other actuator's. */
+    await withConversationActuation(conversationId, async () => {
+      const claimed = reconciling ? item : registry.beginDeliveryAttempt(item.id, current.id);
+      if (!claimed) return;
+      const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
+      try {
+        const input = { delivery: claimed, path: current.path, clientMessageId };
+        const outcome = reconciling
+          ? await delivery.reconcileUncertain!(input)
+          : await delivery.deliver(input);
+        if (outcome === "held") {
+          if (!reconciling) registry.requeueUnactuatedDelivery(claimed.id);
+        }
+        else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
+      } catch {
+        registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
       }
-      else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
-    } catch {
-      registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
-    }
+    });
   });
 }
 

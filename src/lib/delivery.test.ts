@@ -8,6 +8,7 @@ import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, 
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, resumeConversation, type DeliveryFailure } from "./delivery";
+import { withConversationActuation } from "./deliveryActuation";
 import { defaultPipelinePorts } from "./pipelines/engine";
 import type { RuntimeHostClient } from "./runtime/client";
 import { heldDeliveryOccurrences } from "./runtime/deliveredMessageOccurrences";
@@ -763,6 +764,47 @@ test("large text uses a request-local reservation and still reaches ordinary del
   expect(outcome.ok).toBe(true);
   expect(delivered).toBe(text);
   expect(registry.holdDelivery(conversation.id, "", "large-text", "ephemeral-text")).toMatchObject({ state: "delivered", text: "" });
+});
+
+test("a legacy send is actuated inside its conversation's actuation section, after the work already in it (#1709)", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-section-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const events: string[] = [];
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const earlier = withConversationActuation(conversation.id, async () => { events.push("earlier actuation starts"); await released; events.push("earlier actuation ends"); });
+  const send = deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "x".repeat(32_001), images: [], clientMessageId: "legacy-in-section",
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async () => { events.push("legacy send actuates"); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(events).toEqual(["earlier actuation starts"]);
+  release();
+  await earlier;
+  expect((await send).ok).toBe(true);
+  expect(events).toEqual(["earlier actuation starts", "earlier actuation ends", "legacy send actuates"]);
+});
+
+test("a legacy send admitted after a message still waiting for this generation is held behind it, not actuated (#1709)", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-order-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const waiting = registry.holdDelivery(conversation.id, "admitted first, still waiting", "legacy-waiting");
+  expect(waiting.state).toBe("assigned");
+  let actuated = false;
+  const outcome = await deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "admitted second", images: [], clientMessageId: "legacy-second",
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async () => { actuated = true; },
+  });
+  expect(outcome).toMatchObject({ ok: true, outcome: "held" });
+  expect(actuated).toBe(false);
+  expect(registry.pendingDeliveries(conversation.id).map((item) => [item.clientMessageId, item.state, item.attempts]))
+    .toEqual([["legacy-waiting", "assigned", 0], ["legacy-second", "assigned", 0]]);
 });
 
 test("an over-32k agent-origin delivery keeps the digest of the delivered text, so it still projects as internal on both engines (#1117)", async () => {

@@ -37,7 +37,7 @@ import {
   type ViewerConversationId,
 } from "@/lib/accounts/migration/contracts";
 import {
-  COMMITTED_MIGRATION_DELIVERY_REASON,
+  NOT_CARRIED_DELIVERY_REASONS,
   MIGRATION_DELIVERY_CANCELLATION_PREFIX,
   migrationIntentCanEnroll,
   ROLLED_BACK_MIGRATION_DELIVERY_REASON,
@@ -1110,6 +1110,122 @@ function queueAbandonedMigrationCleanup(
   };
 }
 
+/**
+ * The order in which a conversation's deliveries were admitted (#1709). Rows
+ * that carry `admissionSeq` order by it, which the reservation transaction
+ * assigns, so two admissions in the same millisecond keep their order. A row
+ * without one was written before the sequence existed: it orders before every
+ * sequenced row, and among such rows by `createdAt`, then id, as before.
+ */
+export function compareDeliveryAdmission(
+  left: Pick<HeldDelivery, "admissionSeq" | "createdAt" | "id">,
+  right: Pick<HeldDelivery, "admissionSeq" | "createdAt" | "id">,
+): number {
+  const leftSeq = left.admissionSeq;
+  const rightSeq = right.admissionSeq;
+  if ((leftSeq === undefined) !== (rightSeq === undefined)) return leftSeq === undefined ? -1 : 1;
+  if (leftSeq !== undefined && rightSeq !== undefined && leftSeq !== rightSeq) return leftSeq - rightSeq;
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+/** The next admission sequence of a canonical conversation, inside the reservation's own transaction. */
+function nextAdmissionSeq(file: RegistryFile, canonicalId: ViewerConversationId): number {
+  let highest = 0;
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (typeof delivery.admissionSeq !== "number" || delivery.admissionSeq <= highest) continue;
+    if (resolveConversationAlias(file, delivery.conversationId) === canonicalId) highest = delivery.admissionSeq;
+  }
+  return highest + 1;
+}
+
+type CommitDeliveryDecision = "carry" | "leave" | keyof typeof NOT_CARRIED_DELIVERY_REASONS;
+
+/**
+ * What a committing switch does with one pending delivery of its conversation (#1709).
+ *
+ * - `carry`: provably unsent and provably this switch's to carry. Unattempted
+ *   (no attempt, no materialized artifact, no retry attempt), exactly this
+ *   conversation, held by the committing migration or assigned to the
+ *   predecessor generation, with an owner row that has no outcome, and none of
+ *   the exclusions below.
+ * - an exclusion (its reason key): provably this switch's, but not delivered
+ *   automatically. `attempted` may have reached the previous account;
+ *   `turn` answers the previous account's turn (a string `turnId` fence under
+ *   a policy other than interrupt-active, which the queue delivers only into
+ *   that turn); `inject` is injected context, which is never held across a
+ *   switch (#1560); `requestLocal` has attachment bytes only its client holds.
+ * - `leave`: nothing proves this switch owns it (another conversation's
+ *   identity, a foreign or unproven fence, an older generation, an owner row
+ *   missing or already settled). It stays exactly as it is.
+ */
+function commitDeliveryDecision(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  migration: ConversationMigration,
+  predecessor: NativeGeneration,
+  delivery: HeldDelivery,
+): CommitDeliveryDecision {
+  if (delivery.conversationId !== conversation.id || delivery.runtimeConversationId !== conversation.id) return "leave";
+  const owned = delivery.state === "held"
+    ? migrationHeldDelivery(file, conversation, delivery, migration)
+    : (delivery.state === "assigned" || delivery.state === "delivery-uncertain") && delivery.generationId === predecessor.id;
+  if (!owned) return "leave";
+  const owners = Object.entries(file.deliveryOperationOwners).filter(([, owner]) => owner.deliveryId === delivery.id);
+  const own = file.deliveryOperationOwners[delivery.command.operationId];
+  if (!own || own.deliveryId !== delivery.id) return "leave";
+  if (owners.some(([, owner]) => owner.terminalState !== null || owner.terminalDisposition !== null)) return "leave";
+  if (delivery.state === "delivery-uncertain"
+    || delivery.attempts > 0
+    || delivery.artifactPaths.length > 0
+    || owners.some(([operationId, owner]) => operationId !== delivery.command.operationId || owner.retryOfOperationId !== null)) {
+    return "attempted";
+  }
+  if (delivery.payloadKind !== "text" && delivery.payloadKind !== "runtime-images") return "requestLocal";
+  if (delivery.command.kind === "inject") return "inject";
+  if (typeof delivery.command.turnId === "string" && delivery.command.policy !== "interrupt-active") return "turn";
+  return "carry";
+}
+
+/**
+ * Settles a committing switch's pending deliveries in its own transaction (#1709):
+ * carried ones move to the successor with everything they carried and their
+ * admission order; excluded ones end failed with their payload kept, `lost`
+ * when never attempted (safe to send again) and `unverified` otherwise; the
+ * rest stay as they are.
+ */
+function settleDeliveriesAtCommit(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  migration: ConversationMigration,
+  predecessor: NativeGeneration,
+  successor: NativeGeneration,
+  committedAt: string,
+): void {
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.state === "delivered" || delivery.state === "failed") continue;
+    const decision = commitDeliveryDecision(file, conversation, migration, predecessor, delivery);
+    if (decision === "leave") continue;
+    if (decision === "carry") {
+      delivery.state = "assigned";
+      delivery.fencedBy = null;
+      delivery.generationId = successor.id;
+      delivery.assignedAt = committedAt;
+      delivery.deliveredAt = null;
+      delivery.error = null;
+      syncDeliveryOperationOwnerState(file, delivery);
+      continue;
+    }
+    delivery.state = "failed";
+    delivery.fencedBy = null;
+    delivery.generationId = null;
+    delivery.assignedAt = null;
+    delivery.deliveredAt = null;
+    delivery.error = NOT_CARRIED_DELIVERY_REASONS[decision].slice(0, 240);
+    failInitialSpawnReceiptForDelivery(file, delivery);
+    syncDeliveryOperationOwnerState(file, delivery, decision === "attempted" ? "unverified" : "lost");
+  }
+}
+
 function terminalizeCancelledMigrationDeliveries(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -1922,6 +2038,7 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
     recoveryIntent: value.recoveryIntent === "reclaimed-host" ? value.recoveryIntent : null,
     state,
     fencedBy: state === "held" && typeof value.fencedBy === "string" ? value.fencedBy : null,
+    admissionSeq: Number.isSafeInteger(value.admissionSeq) && value.admissionSeq! > 0 ? value.admissionSeq : undefined,
     generationId: imagesCorrupt ? null : value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
     assignedAt: imagesCorrupt ? null : value.assignedAt ?? null,
@@ -7183,7 +7300,7 @@ export class AgentRegistry {
       );
       conversation.migration = { ...migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
-      terminalizeCancelledMigrationDeliveries(file, conversation, COMMITTED_MIGRATION_DELIVERY_REASON);
+      settleDeliveriesAtCommit(file, conversation, migration, predecessor, generation, committedAt);
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
       return clone(conversation);
@@ -7424,6 +7541,7 @@ export class AgentRegistry {
         command: canonicalHeldDeliveryCommand(commandInput, deliveryId),
         requestDigest,
         recoveryIntent,
+        admissionSeq: nextAdmissionSeq(file, canonicalId),
         state: "held",
         generationId: null,
         attempts: 0,
@@ -7484,7 +7602,7 @@ export class AgentRegistry {
     const canonicalId = resolveConversationAlias(snapshot, conversationId);
     return clone(Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)));
+      .sort(compareDeliveryAdmission));
   }
 
   terminalizeHeldDelivery(id: string, reason: string): HeldDelivery {
@@ -7556,6 +7674,15 @@ export class AgentRegistry {
       const migrationBlocksDelivery = conversation?.migration
         && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       if (migrationBlocksDelivery || conversation?.generations.at(-1)?.id !== generationId) return null;
+      /* #1709: never ahead of an earlier admission still waiting for this generation, so a send made after a
+         switch commits cannot overtake what the switch carried. Every actuator claims here, and its claim and
+         journal admission run inside `withConversationActuation`, so an earlier claim is admitted first. */
+      const canonicalId = resolveConversationAlias(file, delivery.conversationId);
+      if (Object.values(file.heldDeliveries).some((other) => other.id !== delivery.id
+        && other.state === "assigned"
+        && other.generationId === generationId
+        && resolveConversationAlias(file, other.conversationId) === canonicalId
+        && compareDeliveryAdmission(other, delivery) < 0)) return null;
       delivery.state = "delivery-uncertain";
       delivery.attempts += 1;
       delivery.error = "delivery started; recovery requires an explicit outcome";

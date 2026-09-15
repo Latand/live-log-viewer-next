@@ -9987,3 +9987,140 @@ test("the engine keeps a switched stage's attempt running across an unavailable 
   expect(current.cursor?.activatedBy?.edge ?? null).not.toBe("fail");
   expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(1);
 });
+
+/* Integration (#1695 K6c, #1709): a real, isolated registry switches the stage's conversation to another
+   account through the structured reconfigure; the message the operator sent while the switch waited is
+   carried by the commit and delivered by the ordinary migration tick; that delivery is what starts the
+   successor's turn, and the stage settles on the successor's verdict. No host, socket or account is touched. */
+test("a stage conversation switched to another account continues on the message held for the switch and settles on the successor's verdict without the fail edge (#1695 K6c)", async () => {
+  const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
+  const { advanceConversationMigration, reconcileMigrations } = await import("@/lib/accounts/migration/coordinator");
+  const { applyStructuredReconfigure } = await import("@/lib/runtime/structuredReconfigure");
+  const { procBackend } = await import("@/lib/proc");
+  const { boardFor } = await import("@/lib/board/store");
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "k6c-switched-stage-registry.json"));
+  const sourcePath = "/codex/k6c-stage-source.jsonl";
+  const successorPath = "/codex/accounts/account-b/k6c-stage-successor.jsonl";
+  const profile = emptyLaunchProfile({ cwd: "/repo", project: "repo" });
+  const hostProcess = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  const observe = (turn: "busy" | "idle", observedAt: string) => registry.reconcileConversations([{
+    engine: "codex", path: sourcePath, accountId: "account-a", launchProfile: profile,
+    turn: { state: turn, source: "assistant", terminalAt: turn === "idle" ? observedAt : null }, observedAt,
+  }] as never);
+  const recordHost = (activeTurnRef: string | null) => registry.upsert({
+    key: { engine: "codex", sessionId: stageConversationGeneration() },
+    artifactPath: sourcePath, cwd: "/repo", accountId: "account-a", launchProfile: profile,
+    status: activeTurnRef ? "live" : "idle", host: null,
+    structuredHost: { kind: "codex-app-server", endpoint: "stdio:k6c", process: hostProcess, eventCursor: 1, protocolVersion: "v2", writerClaimEpoch: 1, activeTurnRef, pendingAttention: [], activeFlags: [] },
+    claimEpoch: 1, claimOwner: `structured-host:${JSON.stringify(hostProcess)}`, pendingAction: null,
+  });
+  observe("busy", "2026-07-21T10:00:10.000Z");
+  const stageConversation = registry.conversationForPath(sourcePath)!.id;
+  function stageConversationGeneration() { return registry.conversation(stageConversation)!.generations[0]!.id; }
+  recordHost("turn-source");
+
+  const h = harness();
+  const spawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    const spawned = await spawn(input, (reserved) => onReserved({ ...reserved, conversationId: stageConversation }));
+    return { ...spawned, conversationId: stageConversation, transcript: sourcePath };
+  };
+  /* Where the conversation lives now, as the registry says: the engine follows it across the switch. */
+  const basePath = h.ports.pathForConversation;
+  const baseConversation = h.ports.conversationIdForPath;
+  h.ports.pathForConversation = (id) => id === stageConversation ? registry.conversation(stageConversation)?.generations.at(-1)?.path ?? null : basePath(id);
+  h.ports.conversationIdForPath = (pathname) => registry.conversationForPath(pathname)?.id ?? baseConversation(pathname);
+  await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build", next: null, onFail: { to: "recover", maxRounds: 1 } },
+    { id: "recover", kind: "run", role: { roleId: "builder" }, prompt: "Recover {{prev.output}}", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  makeStructuredAttempt();
+  pinStageHead(h);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.conversationId).toBe(stageConversation);
+
+  /* The successor engine answers only what it is sent. */
+  const successor = {
+    received: [] as string[],
+    receive(text: string) {
+      this.received.push(text);
+      h.durableTurns.set(successorPath, { turn: "busy", message: null });
+      h.setConversationActive(true);
+    },
+    finishTurn() {
+      if (this.received.length === 0) return;
+      h.durableTurns.set(successorPath, { turn: "terminal", message: { text: PASS_TEXT, ts: 5_600_000 } });
+      h.setConversationActive(false);
+    },
+  };
+  const provider = {
+    virtualSource: true as const,
+    async create(input: { operationId: string }) {
+      return { operationId: input.operationId, nativeId: "k6c-stage-successor", path: successorPath, continuityPaths: [], historyHash: "k6c-history", host: { kind: "codex-app-server" as const, identity: "k6c-successor-host", epoch: 1, verifiedAt: "2026-07-21T10:01:00.000Z" } };
+    },
+    async verify() {},
+  };
+  const effect = { operationId: "k6c-switch-to-b", conversationId: stageConversation, kind: "reconfigure" as const, model: "gpt-5.6-sol", effort: "medium", fast: false, accountId: "account-b", eventSeq: 11 };
+  const applySwitch = () => applyStructuredReconfigure(effect, {
+    registry,
+    validateAccount: async () => {},
+    resolveAccount: ((engine: string, accountId: string) => ({ accountId, home: process.env.LLV_STATE_DIR!, engine })) as never,
+    releaseHost: async () => true,
+    recover: (async () => true) as never,
+    migrate: (conversationId, _target, store, ownsOperation, reconfigureOperationId) =>
+      advanceConversationMigration(conversationId, store, provider, { ownsOperation, reconfigureOperationId, deferBoardRepair: true }),
+  });
+
+  /* The operator switches the stage's conversation while its turn runs, then tells it to carry on there. */
+  expect(await applySwitch()).toBe("pending");
+  expect(registry.conversation(stageConversation)!.migration?.phase).toBe("waiting-turn");
+  const held = registry.holdDelivery(stageConversation, "Continue the build on the other account.", "k6c-continue");
+  expect(held.state).toBe("held");
+
+  /* The source turn ends without a verdict and its host is released, well inside the grace a dead host gets. */
+  h.durableTurns.set(sourcePath, { turn: "terminal", message: { text: "Halfway through; continuing on the other account.", ts: 5_000_000 } });
+  h.setConversationActive(false);
+  const releasedAt = h.ports.now();
+  h.ports.conversationHostUnavailableSince = async () => releasedAt;
+  h.advanceWallClock(60_000);
+  await tickPipelines([entry(sourcePath)], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
+
+  /* The queue runs the switch again at the turn boundary, and it commits on account B. */
+  recordHost(null);
+  observe("idle", "2026-07-21T10:00:30.000Z");
+  expect(await applySwitch()).toBe("applied");
+  expect(registry.conversation(stageConversation)!.generations.at(-1)).toMatchObject({ accountId: "account-b", path: successorPath });
+
+  /* The ordinary migration tick delivers what the switch carried, to the successor, once. */
+  const delivered: Array<{ path: string; operationId: string }> = [];
+  const port = {
+    async deliver({ delivery, path: target }: { delivery: { text: string; command: { operationId: string } }; path: string }) {
+      delivered.push({ path: target, operationId: delivery.command.operationId });
+      successor.receive(delivery.text);
+      return "delivered" as const;
+    },
+  };
+  const tick = () => reconcileMigrations(provider, port, registry, { remapBoardPaths: (project) => boardFor(project), transferBoardPathPlacements: () => {} });
+  await tick();
+  await tick();
+  expect(delivered).toEqual([{ path: successorPath, operationId: held.command.operationId }]);
+  expect(successor.received).toEqual(["Continue the build on the other account."]);
+
+  h.ports.conversationHostUnavailableSince = async () => null;
+  h.advanceWallClock(5 * 60_000);
+  await tickPipelines([{ ...entry(successorPath), activity: "live" }], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({ state: "running", agentPath: successorPath });
+
+  successor.finishTurn();
+  await tickPipelines([entry(successorPath)], h.ports);
+  await tickPipelines([entry(successorPath)], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "passed", agentPath: successorPath, conversationId: stageConversation, verdict: { status: "pass" } });
+  expect(current.runs.find((run) => run.stageId === "recover")?.attempts ?? []).toEqual([]);
+  expect(current.cursor?.activatedBy?.edge ?? null).not.toBe("fail");
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(1);
+});

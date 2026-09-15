@@ -8,6 +8,13 @@ export const ROLLED_BACK_MIGRATION_DELIVERY_REASON =
   `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration was rolled back; send again to authorize a fresh delivery`;
 export const COMMITTED_MIGRATION_DELIVERY_REASON =
   `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration committed; send again to authorize a fresh delivery action`;
+/* #1709: why a delivery the committing switch provably owned was not carried to the successor. Its payload stays. */
+export const NOT_CARRIED_DELIVERY_REASONS = {
+  attempted: `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its account switch committed after a delivery attempt that may have reached the previous account; check before sending it again`,
+  turn: `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its account switch committed and it was bound to the previous account's turn; send again to authorize a fresh delivery action`,
+  inject: `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its account switch committed and injected context is not carried across a switch; send again to authorize a fresh delivery action`,
+  requestLocal: `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its account switch committed and its attachments are held only by the client that sent it; send it again from there`,
+} as const;
 
 export function rolledBackMigrationOwnsDelivery(
   delivery: Pick<HeldDelivery, "createdAt" | "assignedAt">,

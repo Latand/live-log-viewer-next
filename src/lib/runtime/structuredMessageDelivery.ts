@@ -10,6 +10,7 @@ import { structuredHostsEnabled } from "./flags";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { advanceConversationMigration, deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
+import { withConversationActuation } from "@/lib/deliveryActuation";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
@@ -1071,22 +1072,7 @@ export async function enqueueStructuredMessage(
         operationId: reservation.command.operationId,
       };
     }
-    if (reservation.state === "assigned" && reservation.generationId) {
-      const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
-      if (!claimed) {
-        registry.requeueHeldDelivery(reservation.id);
-        (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
-        return {
-          ok: true,
-          structured: true,
-          target: recoveredHost ? null : conversation.id,
-          outcome: "held",
-          operationId: reservation.command.operationId,
-          ...(recoveredHost ? { spawned: true } : {}),
-        };
-      }
-      claimedReservationId = claimed.id;
-    } else {
+    if (reservation.state !== "assigned" || !reservation.generationId) {
       return {
         ok: false,
         structured: true,
@@ -1095,26 +1081,48 @@ export async function enqueueStructuredMessage(
         status: 409,
       };
     }
-    commandResult = await client.command({
-      kind: reservation.command.kind,
-      operationId: reservation.command.operationId,
-      conversationId: reservation.runtimeConversationId,
-      idempotencyKey,
-      text: content.content.text,
-      ...(refs.length ? { images: refs } : {}),
-      contentDigest: content.contentDigest,
-      /* #1560: an injection carries NO policy. There is no interrupt to choose
-         and no queue to fall back to, and the parser refuses one — so stamping
-         the send default here refused every injection at the journal, with
-         `thread/inject_items` never called. The default stays exactly what it
-         was for every other kind. */
-      ...(reservation.command.kind === "inject" ? {} : { policy: request.policy ?? "interrupt-active" }),
-      ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
-      ...(request.runtime ? { runtime: request.runtime } : {}),
-      ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
-      ...(request.origin ? { origin: request.origin } : {}),
+    const assigned = { id: reservation.id, generationId: reservation.generationId, command: reservation.command, runtimeConversationId: reservation.runtimeConversationId };
+    /* #1709: the claim and the command's admission to the journal run in the conversation's actuation section,
+       so a send claimed after another reaches the journal after it. */
+    const admitted = await withConversationActuation(conversation.id, async () => {
+      const claimed = registry.beginDeliveryAttempt(assigned.id, assigned.generationId);
+      if (!claimed) return null;
+      claimedReservationId = claimed.id;
+      commandResult = await client.command({
+        kind: assigned.command.kind,
+        operationId: assigned.command.operationId,
+        conversationId: assigned.runtimeConversationId,
+        idempotencyKey,
+        text: content.content.text,
+        ...(refs.length ? { images: refs } : {}),
+        contentDigest: content.contentDigest,
+        /* #1560: an injection carries NO policy. There is no interrupt to choose
+           and no queue to fall back to, and the parser refuses one — so stamping
+           the send default here refused every injection at the journal, with
+           `thread/inject_items` never called. The default stays exactly what it
+           was for every other kind. */
+        ...(assigned.command.kind === "inject" ? {} : { policy: request.policy ?? "interrupt-active" }),
+        ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+        ...(request.runtime ? { runtime: request.runtime } : {}),
+        ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
+        ...(request.origin ? { origin: request.origin } : {}),
+      });
+      return commandResult;
     });
-    const result = commandResult;
+    if (!admitted) {
+      /* A migration took the conversation, or an earlier admission still waits: the drain delivers this one in order. */
+      registry.requeueHeldDelivery(reservation.id);
+      (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
+      return {
+        ok: true,
+        structured: true,
+        target: recoveredHost ? null : conversation.id,
+        outcome: "held",
+        operationId: reservation.command.operationId,
+        ...(recoveredHost ? { spawned: true } : {}),
+      };
+    }
+    const result = admitted;
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {
       if (claimedReservationId && receipt.status !== "uncertain") {
@@ -1148,8 +1156,10 @@ export async function enqueueStructuredMessage(
     };
   } catch (error) {
     const failure = deliveryFailure(error);
-    if (!commandResult) return failure;
-    const receipt = commandResult.receipt;
+    /* Assigned inside the actuation section's callback, which control-flow narrowing does not follow. */
+    const handedOver = commandResult as RuntimeOperationResult | null;
+    if (!handedOver) return failure;
+    const receipt = handedOver.receipt;
     const definitiveFailure = receipt.status === "failed" || receipt.status === "rejected";
     return {
       ok: false,
@@ -1157,7 +1167,7 @@ export async function enqueueStructuredMessage(
       outcome: "failed",
       error: failure.error,
       status: failure.status,
-      operationId: commandResult.operationId,
+      operationId: handedOver.operationId,
       receipt,
       ...(!definitiveFailure ? { transportUncertain: true } : {}),
     };

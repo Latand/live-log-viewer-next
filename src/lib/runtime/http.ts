@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { withConversationActuation } from "@/lib/deliveryActuation";
 import { structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import type { InboxFileUpload, StagedInboxFiles } from "@/lib/inboxFiles";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
@@ -716,19 +717,23 @@ export async function handleRuntimeRetry(
         }
         return NextResponse.json({ error: "delivery outcome is already resolved" }, { status: 409 });
       }
-      if (reservation.state === "assigned" && reservation.generationId) {
-        const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
-        if (!claimed) {
-          return NextResponse.json({
-            error: "delivery reservation ownership changed before retry admission",
-            retryable: true,
-          }, { status: 503 });
+      /* #1709: the retry's claim and its admission to the journal run in the conversation's actuation section. */
+      const retried = await withConversationActuation(registry.canonicalConversationId(reservation.conversationId), async () => {
+        if (reservation.state === "assigned" && reservation.generationId) {
+          const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
+          if (!claimed) return null;
         }
+        return previous.receipt.status !== "pending" && previous.receipt.status !== "queued"
+          ? await client.retryOperation(operationId)
+          : previous;
+      });
+      if (!retried) {
+        return NextResponse.json({
+          error: "delivery reservation ownership changed before retry admission",
+          retryable: true,
+        }, { status: 503 });
       }
-      let result = previous;
-      if (previous.receipt.status !== "pending" && previous.receipt.status !== "queued") {
-        result = await client.retryOperation(operationId);
-      }
+      const result = retried;
       dependencies.kick();
       return NextResponse.json({
         operationId,

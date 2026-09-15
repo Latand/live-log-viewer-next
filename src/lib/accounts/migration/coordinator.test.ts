@@ -1944,13 +1944,9 @@ describe("durable account migration coordinator", () => {
       { remapBoardPaths() { throw new Error("board unavailable"); } },
     );
 
-    expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({
-      state: "failed",
-      attempts: 0,
-      generationId: null,
-      error: expect.stringContaining("fresh delivery action"),
-    });
+    /* #1709: the held input was never attempted, so the commit carries it and the same pass delivers it. */
+    expect(delivered).toEqual(["board-retry-delivery"]);
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "delivered", attempts: 1 });
     expect(store.snapshot().migrationIntents[store.conversation(conversation.id)!.migration!.intentId]?.state).toBe("complete");
     expect(store.conversation(conversation.id)?.migration?.boardProject).toBeNull();
 
@@ -2312,7 +2308,7 @@ describe("durable account migration coordinator", () => {
     expect(restarted.pendingDeliveries(conversation.id)).toHaveLength(1);
   });
 
-  test("A to B to A preserves one owner and requires fresh input after commit", async () => {
+  test("A to B to A preserves one owner and carries unsent input across the commit (#1709)", async () => {
     const store = registry();
     store.reconcileConversations([observation("/a.jsonl", "a", "idle")]);
     const conversation = store.conversationForPath("/a.jsonl")!;
@@ -2326,16 +2322,11 @@ describe("durable account migration coordinator", () => {
     expect(commitCurrentSuccessor(store, conversation.id, { id: successor.id, path: successor.path, accountId: successor.accountId }, committedOnce.migration!.revision).generations).toHaveLength(2);
     const delivered: string[] = [];
     await drainHeldDeliveries(conversation.id, { async deliver(input) { delivered.push(input.clientMessageId); return "delivered"; } }, store);
-    expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({
-      state: "failed",
-      attempts: 0,
-      generationId: null,
-      error: expect.stringContaining("fresh delivery action"),
-    });
+    expect(delivered).toEqual(["client-1"]);
+    expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "delivered", attempts: 1, generationId: successor.id });
     const fresh = store.holdDelivery(conversation.id, "fresh fixture", "client-1-fresh");
     await drainHeldDeliveries(conversation.id, { async deliver(input) { delivered.push(input.clientMessageId); return "delivered"; } }, store);
-    expect(delivered).toEqual(["client-1-fresh"]);
+    expect(delivered).toEqual(["client-1", "client-1-fresh"]);
     expect(store.snapshot().heldDeliveries[fresh.id]).toMatchObject({ state: "delivered", attempts: 1 });
     store.setMigrationIntentState(firstIntent.id, "complete");
 
@@ -2350,7 +2341,7 @@ describe("durable account migration coordinator", () => {
     expect(final.generations.at(-1)?.launchProfile.plan?.current).toBe("Implement");
   });
 
-  test("retargeting terminalizes the prior action and requires fresh input after the new commit", async () => {
+  test("retargeting ends the attempt it interrupted as unverified, payload kept, and carries the unattempted input to the new commit (#1709)", async () => {
     const store = registry();
     store.reconcileConversations([observation("/delivery-source.jsonl", "a", "idle")]);
     const conversation = store.conversationForPath("/delivery-source.jsonl")!;
@@ -2363,7 +2354,7 @@ describe("durable account migration coordinator", () => {
     });
     const old = store.holdDelivery(conversation.id, "fixture payload", "delivery-retarget");
     await advanceConversationMigration(conversation.id, store, provider(["/delivery-b.jsonl"]));
-    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "failed", attempts: 0 });
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "assigned", attempts: 0 });
     const firstFresh = store.holdDelivery(conversation.id, "fresh fixture", "delivery-retarget-fresh");
 
     await drainHeldDeliveries(conversation.id, {
@@ -2380,19 +2371,24 @@ describe("durable account migration coordinator", () => {
     }, store);
 
     expect(store.conversation(conversation.id)?.migration).toMatchObject({ targetId: "c", phase: "waiting-turn" });
+    /* The carried input went first and its attempt was interrupted by the retarget; the later one never started. */
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "held", attempts: 1, generationId: null });
     expect(store.snapshot().heldDeliveries[firstFresh.id]).toMatchObject({
       clientMessageId: "delivery-retarget-fresh",
-      state: "held",
-      generationId: null,
+      state: "assigned",
+      attempts: 0,
     });
 
     await advanceConversationMigration(conversation.id, store, provider(["/delivery-c.jsonl"]));
-    expect(store.snapshot().heldDeliveries[firstFresh.id]).toMatchObject({
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({
       state: "failed",
       attempts: 1,
+      text: "fixture payload",
       generationId: null,
-      error: expect.stringContaining("fresh delivery action"),
+      error: expect.stringContaining("may have reached the previous account"),
     });
+    const retargeted = store.conversation(conversation.id)!.generations.at(-1)!;
+    expect(store.snapshot().heldDeliveries[firstFresh.id]).toMatchObject({ state: "assigned", attempts: 0, generationId: retargeted.id });
     const delivered: string[] = [];
     const secondFresh = store.holdDelivery(conversation.id, "new fixture", "delivery-after-retarget");
     await drainHeldDeliveries(conversation.id, {
@@ -2401,7 +2397,7 @@ describe("durable account migration coordinator", () => {
         return "delivered";
       },
     }, store);
-    expect(delivered).toEqual(["delivery-after-retarget"]);
+    expect(delivered).toEqual(["delivery-retarget-fresh", "delivery-after-retarget"]);
     expect(store.snapshot().heldDeliveries[secondFresh.id]).toMatchObject({ state: "delivered", attempts: 1 });
   });
 
@@ -2859,7 +2855,7 @@ describe("durable account migration coordinator", () => {
     expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "failed", attempts: 0 });
   });
 
-  test("migration commit preserves the root goal and terminalizes pre-migration queued input", async () => {
+  test("migration commit preserves the root goal and carries pre-migration queued input (#1709)", async () => {
     const store = registry();
     store.reconcileConversations([observation("/root.jsonl", "a", "idle", "root")]);
     const conversation = store.conversationForPath("/root.jsonl")!;
@@ -2877,21 +2873,16 @@ describe("durable account migration coordinator", () => {
     const successor = committed.generations.at(-1)!;
     expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(successor.launchProfile).toMatchObject({ role: "root", goal: { objective: "Ship", status: "active" } });
-    expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({
-      state: "failed",
-      attempts: 0,
-      generationId: null,
-      error: expect.stringContaining("fresh delivery action"),
-    });
+    expect(delivered).toEqual(["root-delivery"]);
+    expect(store.snapshot().heldDeliveries[old.id]).toMatchObject({ state: "delivered", attempts: 1, generationId: successor.id });
 
     const fresh = store.holdDelivery(conversation.id, "fresh fixture payload", "fresh-root-delivery");
     expect(fresh).toMatchObject({ state: "assigned", generationId: successor.id, attempts: 0 });
     await drainHeldDeliveries(conversation.id, { async deliver(input) { delivered.push(input.clientMessageId); return "delivered"; } }, store);
-    expect(delivered).toEqual(["fresh-root-delivery"]);
+    expect(delivered).toEqual(["root-delivery", "fresh-root-delivery"]);
   });
 
-  test("migration commit terminalizes input assigned before the intent existed", async () => {
+  test("migration commit carries input assigned before the intent existed (#1709)", async () => {
     const store = registry();
     store.reconcileConversations([observation("/pre-intent-assigned.jsonl", "a", "idle")]);
     const conversation = store.conversationForPath("/pre-intent-assigned.jsonl")!;
@@ -2913,14 +2904,8 @@ describe("durable account migration coordinator", () => {
       },
     }, store);
 
-    expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({
-      state: "failed",
-      attempts: 0,
-      generationId: null,
-      deliveredAt: null,
-      error: expect.stringContaining("fresh delivery action"),
-    });
+    expect(delivered).toEqual(["pre-intent-assigned"]);
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
   });
 
   test("a fresh assigned reservation on a committed migration converges on the next tick", async () => {
@@ -3950,7 +3935,7 @@ describe("durable account migration coordinator", () => {
     expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
   });
 
-  test("a dead null-host Claude OAuth failure releases reseat and cancels pre-migration input", async () => {
+  test("a dead null-host Claude OAuth failure releases reseat and carries the input held for it (#1709)", async () => {
     /* Issue #516: the Claude CLI died on an OAuth failure — the transcript
        ends in a structured `authentication_failed` API-error record and no
        host remains to append a `result` record. The reseat must read that
@@ -4033,19 +4018,14 @@ describe("durable account migration coordinator", () => {
     expect(counts.create).toBe(1);
     expect(committed.generations).toHaveLength(2);
     expect(committed.generations.at(-1)?.path).toBe(successorPath);
-    expect(sends).toEqual([]);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }]);
     expect(restarted.snapshot().migrationIntents[committed.migration!.intentId]).toMatchObject({ scope: "conversation", state: "complete" });
-    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({
-      state: "failed",
-      attempts: 0,
-      generationId: null,
-      error: expect.stringContaining("fresh delivery action"),
-    });
+    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "delivered", attempts: 1 });
 
     const fresh = restarted.holdDelivery(conversation.id, "fresh fixture", "oauth-fresh-client");
     await drainHeldDeliveries(conversation.id, deliveryPort, restarted);
     expect(fresh).toMatchObject({ state: "assigned", generationId: committed.generations.at(-1)?.id });
-    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-fresh-client" }]);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }, { path: successorPath, clientMessageId: "oauth-fresh-client" }]);
 
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
     await drainHeldDeliveries(conversation.id, deliveryPort, restarted);
@@ -4053,14 +4033,14 @@ describe("durable account migration coordinator", () => {
     await advanceConversationMigration(conversation.id, restarted, migrationProvider);
     expect(counts.create).toBe(1);
     expect(createdOperations).toEqual([operationId]);
-    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-fresh-client" }]);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "oauth-held-client" }, { path: successorPath, clientMessageId: "oauth-fresh-client" }]);
     expect(restarted.conversation(conversation.id)?.migration?.phase).toBe("committed");
     expect(restarted.conversation(conversation.id)?.migration?.operationId).toBe(operationId);
     expect(restarted.conversation(conversation.id)?.generations).toHaveLength(2);
     expect(restarted.snapshot().heldDeliveries[fresh.id]).toMatchObject({ state: "delivered", attempts: 1 });
   });
 
-  test("recovery records on an unhosted predecessor release reseat and cancel pre-migration input", async () => {
+  test("recovery records on an unhosted predecessor release reseat and carry the input held for it (#1709)", async () => {
     /* Issue #516 production acceptance blocker: after the terminal OAuth
        failure released the turn, a recovery attempt appended a replayed
        continuation prompt, the synthetic `No response requested.` no-op, the
@@ -4115,23 +4095,18 @@ describe("durable account migration coordinator", () => {
     expect(committed.migration).toMatchObject({ phase: "committed" });
     expect(createdOperations).toEqual([operationId]);
     expect(committed.generations.map((generation) => generation.path)).toEqual([pathname, successorPath]);
-    expect(sends).toEqual([]);
-    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({
-      state: "failed",
-      attempts: 0,
-      generationId: null,
-      error: expect.stringContaining("fresh delivery action"),
-    });
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }]);
+    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({ state: "delivered", attempts: 1 });
 
     const fresh = restarted.holdDelivery(conversation.id, "fresh fixture", "recovery-fresh-client");
     await drainHeldDeliveries(conversation.id, deliveryPort, restarted);
-    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-fresh-client" }]);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }, { path: successorPath, clientMessageId: "recovery-fresh-client" }]);
 
     await reconcileMigrationInventory(restarted, [entry]);
     await reconcileMigrations(migrationProvider, deliveryPort, restarted);
     await drainHeldDeliveries(conversation.id, deliveryPort, restarted);
     expect(counts.create).toBe(1);
-    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-fresh-client" }]);
+    expect(sends).toEqual([{ path: successorPath, clientMessageId: "recovery-held-client" }, { path: successorPath, clientMessageId: "recovery-fresh-client" }]);
     expect(restarted.conversation(conversation.id)?.generations).toHaveLength(2);
     expect(restarted.snapshot().migrationIntents[committed.migration!.intentId]).toMatchObject({ scope: "conversation", state: "complete" });
     expect(restarted.snapshot().heldDeliveries[fresh.id]).toMatchObject({ state: "delivered", attempts: 1 });

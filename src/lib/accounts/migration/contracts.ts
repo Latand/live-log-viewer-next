@@ -359,6 +359,10 @@ export interface HeldDelivery {
       supersede of that migration touches only the deliveries it fenced. Absent
       on records written before it existed. */
   fencedBy?: string | null;
+  /** Admission order within the conversation (#1709), assigned once in the
+      transaction that creates the reservation and kept by every replay. A
+      record without it was written before it existed. */
+  admissionSeq?: number;
   generationId: string | null;
   attempts: number;
   assignedAt: string | null;

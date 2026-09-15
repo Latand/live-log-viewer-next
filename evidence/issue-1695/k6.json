@@ -40,7 +40,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:54 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -148,7 +148,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -259,7 +259,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -362,7 +362,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -479,7 +479,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -685,7 +685,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -769,7 +769,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
@@ -879,14 +879,15 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": false,
             "meter": true
           }
         ],
         "notes": [
-          "Messages sent now are held. Cancel delivers them on the current account; if the switch completes, they are not delivered and have to be sent again.",
+          "Messages sent now are held and delivered after the switch, in the order they were sent. Cancel delivers them on the current account instead.",
+          "Not carried: a message bound to the current turn, injected context, or attachments only the sending browser holds. Each ends failed with its reason, keeps the text the Viewer holds for it, and its receipt says whether sending it again is safe.",
           "The running turn is never interrupted. The switch waits for it to end, then this conversation continues on the chosen account.",
           "Accounts outside this project's accounts can be chosen for a conversation; the choice is recorded as yours."
         ],
@@ -950,7 +951,7 @@
           },
           {
             "name": "Account E · Pro",
-            "tag": "limit · resets 08:55 AM",
+            "tag": "limit · resets 09:55 AM",
             "checked": false,
             "disabled": true,
             "meter": true

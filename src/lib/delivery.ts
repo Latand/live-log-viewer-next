@@ -20,6 +20,7 @@ import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/sca
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
+import { withConversationActuation } from "@/lib/deliveryActuation";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 import { SEND_UNVERIFIED_REASON, type SendResendGuidance } from "@/lib/runtime/sendSettlement";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
@@ -708,6 +709,18 @@ interface DeliveryOverrides {
  * through its resume spec, and relays child records through that root.
  */
 export async function deliverConversationMessage(message: ConversationMessage, overrides: DeliveryOverrides = {}): Promise<DeliveryOutcome> {
+  /* #1709: the legacy ladder claims its reservation and actuates it in one stretch, so the whole send runs in
+     the conversation's actuation section; a send claimed after another is actuated after it. */
+  const registry = agentRegistry();
+  const conversationId = (message.conversationId?.startsWith("conversation_")
+    ? registry.conversation(message.conversationId as `conversation_${string}`)
+    : registry.conversationForPath(message.path))?.id ?? null;
+  return conversationId
+    ? withConversationActuation(conversationId, () => deliverConversationMessageInSection(message, overrides))
+    : deliverConversationMessageInSection(message, overrides);
+}
+
+async function deliverConversationMessageInSection(message: ConversationMessage, overrides: DeliveryOverrides): Promise<DeliveryOutcome> {
   const { pid, images } = message;
   const text = message.text.trim();
   /* Byte-measured to match the registry's UTF-8 envelope bound: a multibyte

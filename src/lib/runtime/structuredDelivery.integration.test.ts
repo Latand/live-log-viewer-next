@@ -3145,7 +3145,7 @@ test("a stale synchronization-held steer fails safely across Codex and Claude re
   }
 });
 
-test("a published Codex successor preserves its migration-held reservation as cancelled evidence", async () => {
+test("a published Codex successor receives its migration-held message once, under the original operation (#1709)", async () => {
   const sourceId = "11111111-1111-\x34111-8111-111111111111";
   const successorId = "22222222-2222-\x34222-8222-222222222222";
   const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
@@ -3288,19 +3288,19 @@ test("a published Codex successor preserves its migration-held reservation as ca
 
   expect(order.slice(0, 3)).toEqual(["verify", "publish", "commit"]);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toEqual([]);
+  expect(successorLedger.writes).toMatchObject([{ id: held.command.operationId, text: held.text }]);
   expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
-    state: "failed",
-    text: "",
-    generationId: null,
-    error: expect.stringContaining("migration committed"),
+    state: "delivered",
+    attempts: 1,
+    generationId: successorId,
+    command: { operationId: held.command.operationId },
   });
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
 });
 
-test("a published Claude successor preserves its migration-held reservation as cancelled evidence", async () => {
+test("a published Claude successor receives its migration-held message once, under the original operation (#1709)", async () => {
   const sourceId = "33333333-3333-\x34333-8333-333333333333";
   const successorId = "44444444-4444-\x34444-8444-444444444444";
   const accountRoot = path.join(sandbox, "claude-migration-accounts");
@@ -3494,12 +3494,12 @@ test("a published Claude successor preserves its migration-held reservation as c
 
   expect(publications).toBe(1);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toEqual([]);
+  expect(successorLedger.writes).toMatchObject([{ id: held.command.operationId, text: held.text }]);
   expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
-    state: "failed",
-    text: "",
-    generationId: null,
-    error: expect.stringContaining("migration committed"),
+    state: "delivered",
+    attempts: 1,
+    generationId: successorId,
+    command: { operationId: held.command.operationId },
   });
 
   await bindStructuredDeliveryQueue([], { registry, client: null });

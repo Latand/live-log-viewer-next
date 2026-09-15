@@ -666,6 +666,7 @@ export function ConversationAccountPopover({ anchor, onClose, file, name, stageC
   const pendingNotes = [
     (view.kind === "waiting" || view.kind === "switching") && view.source === "page" ? t("kanban.account.pageOnly") : null,
     view.kind === "waiting" && view.source === "record" ? t("kanban.account.heldNote") : null,
+    view.kind === "waiting" && view.source === "record" ? t("kanban.account.heldExceptionsNote") : null,
     view.kind === "failed" ? t("kanban.account.failedNote") : null,
     view.kind === "unknown" ? t("kanban.account.unknownNote") : null,
     view.kind === "settings" ? t("kanban.account.settingsNote") : null,

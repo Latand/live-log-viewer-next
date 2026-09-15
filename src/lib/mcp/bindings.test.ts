@@ -3004,13 +3004,14 @@ test("send recovery maps the durable delivery record to the closed outcome set",
   const recover = tools.send_message!.recover;
 
   expect(await recover(...binding("absent"))).toMatchObject({ outcome: "unknown", evidence: "none", ids: {} });
+  /* Admitted first: its attempt below may not start behind a later admission still waiting (#1709). */
+  const held = registry.holdDelivery(recipient.id, "hold", "accepted-key", "text", [], null, { operationId: "op_accepted", kind: "send", policy: "queue" });
   /* Legacy: a send has no durable sender identity, so ownership is never established. */
   const reservation = registry.holdDelivery(recipient.id, "hold", "legacy-key", "text", [], null, { operationId: "op_legacy", kind: "send", policy: "queue" });
   const legacy = await recover(...binding("legacy-key", true));
   expect(legacy).toMatchObject({ outcome: "unknown", evidence: "legacy-receipt-unbound", ownership: "unknown", ids: {} });
   expect(JSON.stringify(legacy)).not.toContain("op_legacy");
 
-  const held = registry.holdDelivery(recipient.id, "hold", "accepted-key", "text", [], null, { operationId: "op_accepted", kind: "send", policy: "queue" });
   expect(await recover(...binding("accepted-key"))).toMatchObject({ outcome: "accepted", evidence: "delivery-record", ids: { operationId: "op_accepted", conversationId: recipient.id, deliveryId: held.id } });
   registry.beginDeliveryAttempt(held.id, generationId);
   expect(await recover(...binding("accepted-key"))).toMatchObject({ outcome: "in-flight", ids: { operationId: "op_accepted" }, facts: { state: "in-flight" } });

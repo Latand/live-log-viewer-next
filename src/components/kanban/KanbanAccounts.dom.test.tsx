@@ -431,7 +431,10 @@ test("a switch the migration record reports shows for every page: waiting with m
   await openPicker(host, conversationChip(host));
   expect(kv(host).at(-1)).toEqual(["Pending", "Account C · waits for the current turn to end"]);
   expect(picker(host)!.querySelector("[data-account-pending]")?.getAttribute("data-account-source")).toBe("record");
-  expect(notes(host)[0]).toBe("Messages sent now are held. Cancel delivers them on the current account; if the switch completes, they are not delivered and have to be sent again.");
+  expect(notes(host).slice(0, 2)).toEqual([
+    "Messages sent now are held and delivered after the switch, in the order they were sent. Cancel delivers them on the current account instead.",
+    "Not carried: a message bound to the current turn, injected context, or attachments only the sending browser holds. Each ends failed with its reason, keeps the text the Viewer holds for it, and its receipt says whether sending it again is safe.",
+  ]);
   /* Still waiting for its turn: cancellable by the record's revision. */
   expect(picker(host)!.querySelector("[data-account-cancel]")?.getAttribute("data-account-cancel")).toBe("cancel");
   expect(rows(host).find((entry) => entry.id === "account-g")?.disabled).toBe(false);

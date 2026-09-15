@@ -135,10 +135,11 @@ async function pendingSwitch(options: { claim?: boolean } = {}): Promise<Pending
   const source = admitted.generations.at(-1)!;
   const sourceKey: SessionKey = { engine: "claude", sessionId: source.id };
   recordStructuredHost(registry, sourceKey, sourcePath, "account-a", "turn-source");
-  /* Admitted before any migration exists: assigned to the source generation. */
-  const before = registry.holdDelivery(admitted.id, "sent before the switch", "before-switch");
+  /* Admitted before any migration exists. The first began its attempt (uncertain); the one after it is still
+     assigned to the source generation, since no attempt may start ahead of an earlier admission (#1709). */
   const attempted = registry.holdDelivery(admitted.id, "attempted before the switch", "attempted-before-switch");
   const uncertain = registry.beginDeliveryAttempt(attempted.id, source.id)!;
+  const before = registry.holdDelivery(admitted.id, "sent before the switch", "before-switch");
   const effect: StructuredReconfigureEffect = {
     operationId: "reconfigure-to-b",
     conversationId: admitted.id,
