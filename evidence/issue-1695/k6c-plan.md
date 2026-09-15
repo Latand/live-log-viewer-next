@@ -96,11 +96,17 @@ without it, so such a message is carried.
   per-conversation section:
   - it spans the structured send from its claim to the journal's answer;
   - it spans the drain from each claim through its delivery;
-  - it spans the legacy send from its claim through its actuation, never its recovery or its reservation;
+  - it spans the legacy send from its reservation through its claim and actuation, never its recovery;
   - it spans the retry from its claim through its re-admission.
 
   A later send waits in the section until the earlier command is admitted, then passes the gate, because the
   earlier row is no longer `assigned`.
+
+  The legacy send reserves only once the section is its own (round 1 of the review of #1713). The migration tick
+  cancels an unclaimed reservation with no owner evidence and fails an unclaimed request-local one, from outside
+  any section. A reservation admitted before the wait was found there: its text was blanked or its image send
+  refused, and the send re-armed the blank row. A claim refused inside the section puts back only a reservation
+  still `held` or `assigned`; one already settled answers as it settled and is never re-armed.
 - **Ownership is explicit** (#1709 follow-up, from the review of #1711). The section is a plain promise chain per
   conversation. Its work receives a lease, and only code handed that lease as an argument continues inside it:
   the drain passes it to the delivery it calls, and a legacy delivery that recovers into a structured send passes
@@ -113,8 +119,9 @@ without it, so such a message is carried.
   refused while the earlier one is `assigned`.
 - **A parked switch keeps delivering** (P2). While a switch is `failed-recoverable`, the conversation stays on its
   current generation and its sends are assigned there. The ordinary tick now drains what is assigned, in
-  admission order, so a reservation no sender went on to claim cannot hold back every later send. Uncertain
-  deliveries still only reconcile; nothing is replayed.
+  admission order, so a reservation no sender went on to claim cannot hold back every later send. It runs for
+  assigned deliveries of the current generation only, and not again for a conversation this pass already drained.
+  Uncertain deliveries still only reconcile, once per tick; nothing is replayed.
 - **Not gating.** An uncertain delivery does not gate a claim, and nothing is replayed. An earlier held or
   older-generation delivery does not gate one either (see the limitations below).
 
@@ -174,6 +181,6 @@ While a recorded switch waits, the picker shows two notes:
 - No runtime host protocol change. No real account switch in any test.
 - The #1709 follow-up (the review of #1711, stacked on it): `deliveryActuation.ts` (a plain chain with an explicit
   lease and a non-waiting try), the drain's try and its tick on release plus the parked-switch drain in
-  `coordinator.ts`, the legacy send's narrowed section and the lease it hands on in `delivery.ts`, the lease
+  `coordinator.ts`, the legacy send's section (from its reservation) and the lease it hands on in `delivery.ts`, the lease
   accepted by `structuredMessageDelivery.ts` and forwarded by `deliveryPort.ts`. Its acceptance tests are in
   `structuredSwitchCommitMessages.test.ts`, `deliveryActuation.test.ts` and `delivery.test.ts`.
