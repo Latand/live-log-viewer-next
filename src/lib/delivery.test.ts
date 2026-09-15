@@ -5,8 +5,8 @@ import path from "node:path";
 
 import type { AccountContext } from "./accounts/contracts";
 import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, type RegistryFile, type TmuxHostEvidence } from "./agent/registry";
-import { emptyLaunchProfile } from "./accounts/migration/contracts";
-import { drainHeldDeliveries } from "./accounts/migration/coordinator";
+import { emptyLaunchProfile, type SuccessorProviderPort } from "./accounts/migration/contracts";
+import { drainHeldDeliveries, reconcileMigrations } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, resumeConversation, type DeliveryFailure } from "./delivery";
 import { withConversationActuation } from "./deliveryActuation";
 import { defaultPipelinePorts } from "./pipelines/engine";
@@ -788,7 +788,7 @@ test("a legacy send is actuated inside its conversation's actuation section, aft
   expect(events).toEqual(["earlier actuation starts", "earlier actuation ends", "legacy send actuates"]);
 });
 
-test("a legacy send's recovery and reservation run outside the actuation section; only its claim and actuation wait (#1709)", async () => {
+test("a legacy send's recovery runs outside the actuation section; its reservation, claim and actuation wait for it (#1709)", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "legacy-narrow-section-registry.json"));
   setAgentRegistryForTests(registry);
   const conversation = registry.ensureConversation("codex", "", "default");
@@ -804,9 +804,9 @@ test("a legacy send's recovery and reservation run outside the actuation section
     sendText: async () => { events.push("actuated"); },
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  /* The section is held by someone else: recovery ran and the reservation is admitted, unclaimed. */
+  /* The section is held by someone else: recovery ran, and nothing is reserved until the section is this send's. */
   expect(events).toEqual(["recovery checked"]);
-  expect(registry.pendingDeliveries(conversation.id).map((item) => [item.clientMessageId, item.state, item.attempts])).toEqual([["legacy-narrow", "assigned", 0]]);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
   release();
   await holder;
   expect((await send).ok).toBe(true);
@@ -831,6 +831,113 @@ test("a reservation the migration drain claimed recovers into a structured send 
   }));
   expect(handed).toEqual([true]);
   expect(outcome).toMatchObject({ ok: true });
+});
+
+/** The ordinary migration tick, with nothing to switch and nothing it may deliver or write to a board. */
+const tickWhileWaiting = (registry: AgentRegistry) => reconcileMigrations(
+  { async create() { throw new Error("no switch in this fixture"); }, async verify() { throw new Error("no switch in this fixture"); } } satisfies SuccessorProviderPort,
+  { async deliver() { throw new Error("the tick must not deliver this send"); } },
+  registry,
+  { remapBoardPaths: () => { throw new Error("no board repair in this fixture"); }, transferBoardPathPlacements: () => { throw new Error("no board repair in this fixture"); } },
+);
+
+test("a migration tick while a legacy text send waits for its section cannot cancel it: the send delivers its own text and records it delivered (#1709)", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-wait-tick-text-registry.json"));
+  setAgentRegistryForTests(registry);
+  /* No owner evidence: the tick cancels an unclaimed reservation of this conversation and blanks its text. */
+  const conversation = registry.ensureConversation("codex", "", "default");
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withConversationActuation(conversation.id, () => released);
+  const sent: string[] = [];
+  const send = deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "the instruction as it was sent", images: [], clientMessageId: "legacy-wait-tick-text",
+  }, {
+    recover: async () => null,
+    targetForKnownPid: async () => "%1",
+    sendText: async (_target, payload) => { sent.push(payload); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await tickWhileWaiting(registry);
+  release();
+  await holder;
+
+  const outcome = await send;
+  expect(outcome).toEqual({ ok: true, target: "%1" });
+  expect(sent).toEqual(["the instruction as it was sent"]);
+  expect(Object.values(registry.readOnlySnapshot().heldDeliveries).map((item) => [item.clientMessageId, item.state, item.attempts]))
+    .toEqual([["legacy-wait-tick-text", "delivered", 1]]);
+});
+
+test("a migration tick while a legacy image send waits for its section cannot fail it: the send gets past its claim and delivers (#1709)", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-wait-tick-image-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  /* Owner evidence: the tick drains this conversation, and fails an unclaimed request-local reservation it finds. */
+  (registry as unknown as { mutate(fn: (file: RegistryFile) => void): void }).mutate((file) => {
+    file.conversations[conversation.id]!.generations.at(-1)!.host = { kind: "codex-app-server", identity: "owned-image-host", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" };
+  });
+  const imagePath = inboxImage("waiting-owned.png");
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withConversationActuation(conversation.id, () => released);
+  const sent: string[] = [];
+  const send = deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "", images: [{ base64: "aW1hZ2U=", mime: "image/png" }], clientMessageId: "legacy-wait-tick-image",
+  }, {
+    recover: async () => null,
+    targetForKnownPid: async () => "%1",
+    buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
+    sendText: async (_target, payload) => { sent.push(payload); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await tickWhileWaiting(registry);
+  release();
+  await holder;
+
+  const outcome = await send;
+  expect(outcome).toEqual({ ok: true, target: "%1", imagePaths: [imagePath] });
+  expect(sent).toEqual([imagePath]);
+  expect(Object.values(registry.readOnlySnapshot().heldDeliveries).map((item) => [item.clientMessageId, item.state, item.payloadKind]))
+    .toEqual([["legacy-wait-tick-image", "delivered", "ephemeral-images"]]);
+});
+
+test("a claim refused on a reservation something else already settled answers with that outcome and leaves the reservation as it is (#1709)", async () => {
+  for (const settlement of ["cancelled", "delivered"] as const) {
+    let settled: unknown = null;
+    class SettlingRegistry extends AgentRegistry {
+      /* Settled between the admission and the claim, which is what the tick did to a send waiting outside the section. */
+      override beginDeliveryAttempt(id: string): null {
+        if (settlement === "cancelled") this.terminalizeHeldDelivery(id, "cancelled before the send claimed it");
+        else this.recordDeliveryOutcome(id, "delivered", null, "delivered");
+        settled = structuredClone(this.readOnlySnapshot().heldDeliveries[id]);
+        return null;
+      }
+    }
+    const registry = new SettlingRegistry(path.join(SANDBOX, `legacy-settled-${settlement}-registry.json`));
+    setAgentRegistryForTests(registry);
+    const conversation = registry.ensureConversation("codex", "", "default");
+    let actuated = false;
+    const outcome = await deliverConversationMessage({
+      pid: 1, path: "", conversationId: conversation.id, text: "settled elsewhere", images: [], clientMessageId: `legacy-settled-${settlement}`,
+    }, {
+      recover: async () => null,
+      targetForKnownPid: async () => "%1",
+      sendText: async () => { actuated = true; },
+    });
+
+    expect(actuated).toBe(false);
+    const rows = Object.values(registry.readOnlySnapshot().heldDeliveries);
+    expect(rows.length).toBe(1);
+    expect(structuredClone(rows[0])).toEqual(settled as never);
+    if (settlement === "cancelled") {
+      expect(outcome).toEqual({ ok: false, outcome: "failed", error: "cancelled before the send claimed it", status: 409 });
+      expect(rows[0]).toMatchObject({ state: "failed", text: "", attempts: 0 });
+    } else {
+      expect(outcome).toEqual({ ok: true, target: conversation.id });
+      expect(rows[0]).toMatchObject({ state: "delivered" });
+    }
+  }
 });
 
 test("a legacy send admitted after a message still waiting for this generation is held behind it, not actuated (#1709)", async () => {
