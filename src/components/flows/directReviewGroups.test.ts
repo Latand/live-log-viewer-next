@@ -537,3 +537,53 @@ describe("splitDirectReviewGroups (terminal review-history stacks)", () => {
     expect(claimedReviewerPaths(groups).has("/r-stopped")).toBe(true);
   });
 });
+
+/*
+ * Anchor resolution by index (#1546). The projection used to scan the whole
+ * file corpus for every group and the whole flows list for every anchor, which
+ * is quadratic on a board with hundreds of each. One index answers both now, so
+ * these cases hold the answers the scans gave — including the generation
+ * ranking a migrated conversation depends on.
+ */
+describe("directReviewFlows anchor resolution", () => {
+  test("the anchor is the CURRENT generation, never the archived predecessor", () => {
+    const archived = entry({ path: "/builder-old", conversationId: "conversation-builder", mtime: 1_000, migratedTo: "/builder-new" });
+    const current = entry({ path: "/builder-new", conversationId: "conversation-builder", predecessorPath: "/builder-old", activity: "live", mtime: 3_000 });
+    const reviewer = directReviewer("/reviewer-1", { id: "conversation-r1", reviews: "conversation-builder", mtime: 4_000, activity: "live" });
+
+    /* Whichever order the scan publishes them in. */
+    for (const files of [[archived, current, reviewer], [current, archived, reviewer], [reviewer, archived, current]]) {
+      const projected = directReviewFlows({ files, flows: [], tasks: [] });
+      expect(projected).toHaveLength(1);
+      expect(projected[0]!.implementerPath).toBe("/builder-new");
+    }
+  });
+
+  test("a materialized transcript outranks the launch placeholder of the same conversation", () => {
+    const placeholder = entry({ path: "spawn:launch-1", conversationId: "conversation-builder", mtime: 2_000 });
+    const materialized = entry({ path: "/builder", conversationId: "conversation-builder", activity: "live", mtime: 3_000 });
+    const reviewer = directReviewer("/reviewer-1", { id: "conversation-r1", reviews: "conversation-builder", mtime: 4_000, activity: "live" });
+
+    expect(directReviewFlows({ files: [placeholder, materialized, reviewer], flows: [], tasks: [] })[0]!.implementerPath).toBe("/builder");
+    /* With nothing materialized yet the placeholder is still the anchor. */
+    expect(directReviewFlows({ files: [placeholder, reviewer], flows: [], tasks: [] })[0]!.implementerPath).toBe("spawn:launch-1");
+  });
+
+  test("an ACTIVE managed flow on the anchor still keeps the deck, whatever its position in the list", () => {
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder", activity: "live" });
+    const reviewer = directReviewer("/reviewer-1", { id: "conversation-r1", reviews: "conversation-builder", mtime: 2_000, activity: "live" });
+    const unrelated = managedFlow({ id: "f-other", implementerPath: "/elsewhere" });
+    const owning = managedFlow({ id: "f-owning", implementerPath: "/builder" });
+
+    expect(directReviewFlows({ files: [builder, reviewer], flows: [unrelated, owning], tasks: [] })).toHaveLength(0);
+    expect(directReviewFlows({ files: [builder, reviewer], flows: [owning, unrelated], tasks: [] })).toHaveLength(0);
+    /* A CLOSED managed flow never owned the deck, so the projection stands. */
+    const closed = managedFlow({ id: "f-owning", implementerPath: "/builder", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    expect(directReviewFlows({ files: [builder, reviewer], flows: [closed], tasks: [] })).toHaveLength(1);
+  });
+
+  test("a reviewed conversation absent from the scan projects nothing", () => {
+    const reviewer = directReviewer("/reviewer-1", { id: "conversation-r1", reviews: "conversation-gone", mtime: 2_000, activity: "live" });
+    expect(directReviewFlows({ files: [reviewer], flows: [], tasks: [] })).toHaveLength(0);
+  });
+});

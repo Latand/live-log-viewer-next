@@ -2,7 +2,7 @@ import type { Flow, Round } from "@/lib/flows/types";
 import { groupDirectReviewers } from "@/lib/flows/directReviewGrouping";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
-import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import { conversationFileIndex, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { projectKey } from "@/components/projectModel";
 import { collapseContext, collapseExempt, conversationSettled, workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
@@ -97,18 +97,28 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
     seenAt: input.seenAt,
   });
 
+  /* Both per-group lookups below are answered from one pass over their inputs:
+     the projection runs for every group on every board update, and scanning the
+     whole file corpus and flows list per group is quadratic in a project with
+     hundreds of each (#1546). `conversationFileIndex` resolves a conversation
+     to its current generation by the same first-match, archived-and-placeholder
+     ranking `currentConversationFile` applies. */
+  const byConversation = conversationFileIndex(visible).currentByConversation;
+  const activeImplementerPaths = new Set<string>();
+  for (const flow of input.flows) if (isActiveFlow(flow)) activeImplementerPaths.add(flow.implementerPath);
+
   const out: Flow[] = [];
   for (const { key, members } of groups) {
     const latest = members[members.length - 1]!;
     /* The deck anchors beside the reviewed conversation of the newest round,
        at its CURRENT generation. No anchor in the scan → nothing to attach the
        deck to; the reviewers keep today's worker-stack behavior. */
-    const anchor = currentConversationFile(visible, latest.reviewedId);
+    const anchor = byConversation.get(latest.reviewedId) ?? null;
     if (!anchor) continue;
     /* Existing flow ownership wins (#112): one node hosts one deck, and an
        active managed loop on the reviewed conversation must keep its deck and
        controls. The direct reviewers then keep today's worker-stack behavior. */
-    if (input.flows.some((flow) => isActiveFlow(flow) && flow.implementerPath === anchor.path)) continue;
+    if (activeImplementerPaths.has(anchor.path)) continue;
     const rounds = members.map<Round>((member, index) => {
       const { file } = member;
       const outcome = file.review ?? null;

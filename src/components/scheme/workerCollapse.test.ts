@@ -12,6 +12,7 @@ import {
   conversationSettled,
   computeWorkerStacks,
   finishedLaneOutcomePaths,
+  flowIdForPath,
   groupWorkerStacks,
   keepExpanded,
   outcomeSeen,
@@ -1035,5 +1036,103 @@ describe("protectedReviewerNodes", () => {
     const flows = [closed({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
     expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(["/rev"]) })).toEqual([]);
     expect(nodes({ files: [authored], flows, hiddenPaths: new Set(["/rev"]) })).toEqual([]);
+  });
+});
+
+/*
+ * The flow-membership INDEX (#1546). Membership used to be a scan of every flow
+ * and every round for each file, from three call sites; it is now one index per
+ * (flows projection, claim resolver) pair. These cases hold the answers that
+ * scan gave — including the ones that depend on its ORDER — and hold the index
+ * to the identity of its inputs, so a changed projection is never answered from
+ * a stale one.
+ */
+describe("flow membership index", () => {
+  test("a reviewer match still wins over an implementer match in an EARLIER flow", () => {
+    /* The scan ran every flow's rounds before any implementer, so a transcript
+       that is flow A's implementer and flow B's reviewer is a reviewer. */
+    const both = entry({ path: "/both", parent: "/orchestrator" });
+    const flows = [
+      flow({ id: "a", implementerPath: "/both", rounds: [round({ reviewerPath: "/other" })] }),
+      flow({ id: "b", implementerPath: "/impl", rounds: [round({ reviewerPath: "/both" })] }),
+    ];
+    expect(classifyWorker(both, lineage(flows))).toBe("flow-reviewer");
+    expect(flowIdForPath(both, flows)).toBe("b");
+  });
+
+  test("the FIRST flow claiming a path wins, as the scan's first match did", () => {
+    const reviewer = entry({ path: "/rev" });
+    const implementer = entry({ path: "/impl", parent: "/orchestrator" });
+    const flows = [
+      flow({ id: "first", implementerPath: "/impl", rounds: [round({ n: 1, reviewerPath: "/rev" })] }),
+      flow({ id: "second", implementerPath: "/impl", rounds: [round({ n: 2, reviewerPath: "/rev" })] }),
+    ];
+    expect(flowIdForPath(reviewer, flows)).toBe("first");
+    expect(flowIdForPath(implementer, flows)).toBe("first");
+  });
+
+  test("durable membership still outranks the path match, and names its own round", () => {
+    const reviewer = entry({
+      path: "/rev",
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-impl",
+        reviewsConversationId: null,
+        memberships: [{ kind: "flow", containerId: "durable", role: "reviewer", round: 2, slot: "reviewer:2", stageId: null, stageOrder: null, parentConversationId: "conversation-impl" }],
+      },
+    });
+    const flows = [
+      flow({ id: "by-path", implementerPath: "/impl", rounds: [round({ n: 1, reviewerPath: "/rev" })] }),
+      flow({ id: "durable", implementerPath: "/other", rounds: [round({ n: 1, reviewerPath: "/x" }), round({ n: 2, reviewerPath: "/y", verdict: "APPROVE", reviewedAt: "2026-07-05T01:00:00Z" })] }),
+    ];
+    expect(flowIdForPath(reviewer, flows)).toBe("durable");
+    /* Round 2 of the durable flow reached a verdict, so the reviewer settles. */
+    expect(conversationSettled(reviewer, lineage(flows))).toBe(true);
+  });
+
+  test("recorded paths are still rewritten onto the projected corpus before matching", () => {
+    /* The flow recorded the pre-cut-over spelling; discovery published the
+       account-local one. Indexing must resolve the RECORDED side, not compare
+       it raw, or the round renders as a free node again (#943 follow-up). */
+    const files = [entry({ path: "/accounts/claude/account-b/projects/p/rev.jsonl" })];
+    const resolve = transcriptClaimResolver(files);
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "$HOME/.claude/projects/p/rev.jsonl" })] })];
+    expect(classifyWorker(files[0]!, { flows, pipelineStagePaths: new Set(), resolveClaimPath: resolve })).toBe("flow-reviewer");
+    /* Without the resolver the recorded spelling stays unmatched, exactly as before. */
+    expect(classifyWorker(files[0]!, lineage(flows))).toBeNull();
+  });
+
+  test("a NEW flows projection is never answered from the previous one's index", () => {
+    const reviewer = entry({ path: "/rev" });
+    const before = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(flowIdForPath(reviewer, before)).toBe("f1");
+    /* The next poll drops the round that claimed it. */
+    const after = [flow({ id: "f1", implementerPath: "/impl", rounds: [] })];
+    expect(flowIdForPath(reviewer, after)).toBeNull();
+    /* And a poll that adds a different claim is seen too. */
+    const later = [flow({ id: "f2", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(flowIdForPath(reviewer, later)).toBe("f2");
+  });
+
+  test("the same flows list under a DIFFERENT resolver resolves differently", () => {
+    const recorded = "$HOME/.claude/projects/p/rev.jsonl";
+    const projected = "/accounts/claude/account-b/projects/p/rev.jsonl";
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: recorded })] })];
+    const file = entry({ path: projected });
+    expect(flowIdForPath(file, flows)).toBeNull();
+    expect(flowIdForPath(file, flows, transcriptClaimResolver([file]))).toBe("f1");
+    /* The identity resolver still answers its own way afterwards. */
+    expect(flowIdForPath(file, flows)).toBeNull();
+  });
+
+  test("a flow with no rounds and a shared implementer path stays one claim", () => {
+    const implementer = entry({ path: "/impl", parent: "/orchestrator" });
+    const flows = [
+      flow({ id: "empty", implementerPath: "/impl", rounds: [] }),
+      flow({ id: "later", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] }),
+    ];
+    expect(flowIdForPath(implementer, flows)).toBe("empty");
+    expect(classifyWorker(implementer, lineage(flows))).toBe("flow-implementer");
   });
 });

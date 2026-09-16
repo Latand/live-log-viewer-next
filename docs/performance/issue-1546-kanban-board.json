@@ -1,0 +1,322 @@
+{
+  "issue": 1546,
+  "base": "94215638792ea00e5c7cd2a8a309bb98960b1023",
+  "harness": "bun scripts/profile-kanban-board.ts <checkout> <out-dir> 35",
+  "environment": {
+    "browser": "headless Chrome 151, 1440x900, devicePixelRatio 1, ~60 Hz",
+    "input": "synthetic wheel events (Playwright mouse.wheel), 80 x 60 px down the Assigned column",
+    "note": "A physical touchpad, a high-density display and refresh rates above 60 Hz were not measured.",
+    "runs": "three repetitions per side, run alternately on one idle machine"
+  },
+  "corpus": {
+    "files": 864,
+    "flows": 284,
+    "tasks": 619,
+    "cards": 359,
+    "dom": 9958
+  },
+  "before": [
+    {
+      "idle": {
+        "windowMs": 35017,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 2092,
+        "framesOver25": 9,
+        "frameMaxMs": 33,
+        "frameP95Ms": 16.7,
+        "commits": 220,
+        "scriptMs": 8358,
+        "jsMs": 6845,
+        "flowMembershipSelfMs": 694,
+        "getBoundingClientRectSelfMs": 323
+      },
+      "still": {
+        "windowMs": 2702,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 163,
+        "framesOver25": 1,
+        "frameMaxMs": 117,
+        "frameP95Ms": 16.8,
+        "commits": 8,
+        "scriptMs": 239,
+        "jsMs": 23
+      },
+      "scroll": {
+        "windowMs": 2668,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 160,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.7,
+        "commits": 35,
+        "scriptMs": 604,
+        "jsMs": 151,
+        "getBoundingClientRectSelfMs": 71,
+        "presence": {
+          "posts": 6,
+          "tiles": 285,
+          "mismatched": []
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "idle": {
+        "windowMs": 35018,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 2095,
+        "framesOver25": 5,
+        "frameMaxMs": 50,
+        "frameP95Ms": 16.8,
+        "commits": 219,
+        "scriptMs": 8317,
+        "jsMs": 6834,
+        "flowMembershipSelfMs": 711,
+        "getBoundingClientRectSelfMs": 316
+      },
+      "still": {
+        "windowMs": 2702,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 163,
+        "framesOver25": 1,
+        "frameMaxMs": 67,
+        "frameP95Ms": 16.8,
+        "commits": 8,
+        "scriptMs": 193,
+        "jsMs": 22
+      },
+      "scroll": {
+        "windowMs": 2659,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 160,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.7,
+        "commits": 33,
+        "scriptMs": 584,
+        "jsMs": 158,
+        "getBoundingClientRectSelfMs": 72,
+        "presence": {
+          "posts": 6,
+          "tiles": 285,
+          "mismatched": []
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "idle": {
+        "windowMs": 35018,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 2095,
+        "framesOver25": 5,
+        "frameMaxMs": 50,
+        "frameP95Ms": 16.8,
+        "commits": 219,
+        "scriptMs": 8037,
+        "jsMs": 6630,
+        "flowMembershipSelfMs": 685,
+        "getBoundingClientRectSelfMs": 324
+      },
+      "still": {
+        "windowMs": 2701,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 162,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.8,
+        "commits": 8,
+        "scriptMs": 203,
+        "jsMs": 23
+      },
+      "scroll": {
+        "windowMs": 2875,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 173,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.8,
+        "commits": 34,
+        "scriptMs": 637,
+        "jsMs": 187,
+        "getBoundingClientRectSelfMs": 90,
+        "presence": {
+          "posts": 6,
+          "tiles": 285,
+          "mismatched": []
+        }
+      },
+      "pageErrors": []
+    }
+  ],
+  "after": [
+    {
+      "idle": {
+        "windowMs": 35016,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 2098,
+        "framesOver25": 2,
+        "frameMaxMs": 50,
+        "frameP95Ms": 16.7,
+        "commits": 211,
+        "scriptMs": 7493,
+        "jsMs": 6006,
+        "flowMembershipSelfMs": 4,
+        "getBoundingClientRectSelfMs": 323
+      },
+      "still": {
+        "windowMs": 2701,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 162,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.8,
+        "commits": 8,
+        "scriptMs": 209,
+        "jsMs": 24
+      },
+      "scroll": {
+        "windowMs": 2664,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 160,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.8,
+        "commits": 13,
+        "scriptMs": 489,
+        "jsMs": 39,
+        "getBoundingClientRectSelfMs": 12,
+        "presence": {
+          "posts": 6,
+          "tiles": 285,
+          "mismatched": []
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "idle": {
+        "windowMs": 35016,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 2098,
+        "framesOver25": 3,
+        "frameMaxMs": 33,
+        "frameP95Ms": 16.7,
+        "commits": 215,
+        "scriptMs": 7638,
+        "jsMs": 6132,
+        "flowMembershipSelfMs": 5,
+        "getBoundingClientRectSelfMs": 321
+      },
+      "still": {
+        "windowMs": 2701,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 162,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.7,
+        "commits": 8,
+        "scriptMs": 203,
+        "jsMs": 23
+      },
+      "scroll": {
+        "windowMs": 2664,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 160,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.7,
+        "commits": 13,
+        "scriptMs": 490,
+        "jsMs": 46,
+        "getBoundingClientRectSelfMs": 19,
+        "presence": {
+          "posts": 6,
+          "tiles": 285,
+          "mismatched": []
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "idle": {
+        "windowMs": 35016,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 2098,
+        "framesOver25": 2,
+        "frameMaxMs": 50,
+        "frameP95Ms": 16.7,
+        "commits": 213,
+        "scriptMs": 7304,
+        "jsMs": 5909,
+        "flowMembershipSelfMs": 3,
+        "getBoundingClientRectSelfMs": 301
+      },
+      "still": {
+        "windowMs": 2702,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 162,
+        "framesOver25": 0,
+        "frameMaxMs": 17,
+        "frameP95Ms": 16.8,
+        "commits": 8,
+        "scriptMs": 195,
+        "jsMs": 19
+      },
+      "scroll": {
+        "windowMs": 2665,
+        "longTasks": 0,
+        "longTaskTotalMs": 0,
+        "longTaskMaxMs": 0,
+        "frames": 161,
+        "framesOver25": 1,
+        "frameMaxMs": 83,
+        "frameP95Ms": 16.7,
+        "commits": 12,
+        "scriptMs": 471,
+        "jsMs": 39,
+        "getBoundingClientRectSelfMs": 14,
+        "presence": {
+          "posts": 6,
+          "tiles": 285,
+          "mismatched": []
+        }
+      },
+      "pageErrors": []
+    }
+  ]
+}

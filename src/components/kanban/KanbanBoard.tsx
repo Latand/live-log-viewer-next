@@ -206,6 +206,13 @@ function withEntry<V>(map: ReadonlyMap<string, V>, key: string, value: V | undef
 
 const NO_EDITS: ReadonlyMap<string, never> = new Map<string, never>();
 
+/** Presence measurement cadence while the operator is scrolling (#1546). The
+    scan reads every card's rect, so it runs at most this often during a gesture
+    and once more after it settles; presence is exact at rest and at worst one
+    window behind while the board is moving. */
+const SCROLL_MEASURE_MS = 100;
+const SCROLL_SETTLE_MS = 120;
+
 function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -1675,15 +1682,23 @@ export function KanbanBoard(props: KanbanBoardProps) {
   /* ── Presence: what the operator can actually see ────────────────────── */
   /* A card counts as seen when it intersects its column's scroll box, the
      board and the window, in a column that is displayed (one tab at a time on
-     a tabbed board). Measured after each render and on any scroll or resize
-     inside the board, one frame at a time. */
-  const [visibleCards, setVisibleCards] = useState("");
+     a tabbed board). Measured after each render, on a resize, and around a
+     scroll — throttled while it runs and settled once it stops. */
+  /* Kept out of React state (#1546): the measurement feeds the presence report
+     and nothing the board draws, so writing it into state re-rendered the board
+     and every column on each scroll frame for a value no card reads. The ref
+     holds it and the report runs straight from the measurement. */
+  const visibleCardsRef = useRef("");
+  const reportPresenceRef = useRef<() => void>(() => {});
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
     let frame = 0;
+    let timer = 0;
+    let measuredAt = 0;
     const measure = () => {
       frame = 0;
+      measuredAt = performance.now();
       const rootRect = root.getBoundingClientRect();
       const ids: string[] = [];
       root.querySelectorAll<HTMLElement>(".column[data-status]").forEach((column) => {
@@ -1701,17 +1716,39 @@ export function KanbanBoard(props: KanbanBoardProps) {
           if (rect.width > 0 && rect.bottom > top && rect.top < bottom && rect.right > left && rect.left < right) ids.push(card.dataset.id!);
         });
       });
-      setVisibleCards(ids.join("\n"));
+      const next = ids.join("\n");
+      if (next === visibleCardsRef.current) return;
+      visibleCardsRef.current = next;
+      reportPresenceRef.current();
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
+    /* Every card's rect is read here, so measuring once per scroll frame was
+       the forced layout #1546 measured. A gesture is throttled to
+       SCROLL_MEASURE_MS and always settles with a final measurement
+       SCROLL_SETTLE_MS after the last scroll event, so what presence reports
+       once the operator stops is the same set the per-frame scan reported —
+       and never more than one throttle window stale while they are moving.
+       An IntersectionObserver cannot express this predicate: visibility here is
+       the intersection of the card with its column body, the board and the
+       viewport, and an observer carries one root. */
+    const settle = () => {
+      timer = 0;
+      schedule();
+    };
+    const onScroll = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(settle, SCROLL_SETTLE_MS);
+      if (performance.now() - measuredAt >= SCROLL_MEASURE_MS) schedule();
+    };
     schedule();
-    root.addEventListener("scroll", schedule, true);
+    root.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", schedule);
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
     observer?.observe(root);
     return () => {
       if (frame) cancelAnimationFrame(frame);
-      root.removeEventListener("scroll", schedule, true);
+      if (timer) window.clearTimeout(timer);
+      root.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", schedule);
       observer?.disconnect();
     };
@@ -1737,23 +1774,24 @@ export function KanbanBoard(props: KanbanBoardProps) {
   }, []);
   const focusedView = focusedReader ? readerViews.find((view) => view.readerKey === focusedReader && !view.folded) : undefined;
   const focusedPath = focusedView?.file.path ?? null;
-  const presenceSignature = useMemo(() => {
+  /* The bus drops a report that reproduces the current slice, which is what the
+     `presenceSignature` memo used to spare this effect; the measurement calls
+     straight into it now, so the dedupe stays where it always was. */
+  const reportPresence = useCallback(() => {
     const paths: string[] = [];
-    for (const id of visibleCards ? visibleCards.split("\n") : []) {
+    for (const id of visibleCardsRef.current ? visibleCardsRef.current.split("\n") : []) {
       for (const member of cardsById.get(id)?.members ?? []) paths.push(member.file.path);
     }
-    return paths.join("\n");
-  }, [visibleCards, cardsById]);
-  useEffect(() => {
-    const order = presenceSignature ? presenceSignature.split("\n") : [];
     viewBus.reportSlice({
       mode: "scheme",
       focusedPath,
-      selectedPaths: selectionInOrder(order, selection, { includeUnordered: true }),
-      visiblePaths: order.slice(0, MAX_VISIBLE_PATHS),
+      selectedPaths: selectionInOrder(paths, selection, { includeUnordered: true }),
+      visiblePaths: paths.slice(0, MAX_VISIBLE_PATHS),
       camera: null,
     });
-  }, [presenceSignature, selection, focusedPath]);
+  }, [cardsById, selection, focusedPath]);
+  reportPresenceRef.current = reportPresence;
+  useEffect(() => { reportPresence(); }, [reportPresence]);
 
   /* ── Focus handoff: the board half, without a camera (#688, C6) ──────── */
   /* Conversations no card holds resolve too: a handoff opens them as a reader of their own. */
