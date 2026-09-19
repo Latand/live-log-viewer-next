@@ -464,12 +464,15 @@ export async function postConversationMigration(
     already moved this thread" without a second poll. */
 export interface ConversationReseatResult {
   ok: boolean;
-  state: "requested" | "already-migrating" | "already-reseated" | "failed";
+  /** `intended`: a structured conversation recorded the chosen account and moves with its next message (#1846). */
+  state: "requested" | "intended" | "already-migrating" | "already-reseated" | "failed";
   /** Exact server-side wait state ("waiting-turn" while a walled turn still
       owns the pane) so the card can say what the reseat is waiting on. */
   phase: string | null;
   /** Public failure detail from the route, safe to show; null otherwise. */
   error: string | null;
+  /** The account the reseat chose, when the route named it. */
+  targetLabel?: string | null;
 }
 
 /**
@@ -491,9 +494,12 @@ export async function postConversationReseat(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "reseat", path }),
     });
-    const body = (await response.json().catch(() => null)) as { reseat?: unknown; phase?: unknown; error?: unknown } | null;
+    const body = (await response.json().catch(() => null)) as { reseat?: unknown; phase?: unknown; error?: unknown; targetLabel?: unknown } | null;
     const reseat = str(body?.reseat);
     const phase = str(body?.phase);
+    if (response.ok && reseat === "intended") {
+      return { ok: true, state: "intended", phase: null, error: null, targetLabel: str(body?.targetLabel) };
+    }
     if (response.ok) {
       return { ok: true, state: reseat === "already-migrating" ? "already-migrating" : "requested", phase, error: null };
     }

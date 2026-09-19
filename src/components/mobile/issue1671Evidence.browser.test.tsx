@@ -852,3 +852,208 @@ browserTest("#1795: the runtime sheet covers the phone from every surface, close
   fs.writeFileSync(path.join(SHEET_EVIDENCE, "runtime-sheet.json"), `${JSON.stringify(results, null, 2)}\n`);
   if (failures.length) throw new Error(JSON.stringify(failures, null, 2));
 }, 300_000);
+
+/*
+ * #1846 — a pick on the phone, on the same real Viewer with the running conversation on a structured host
+ * (`&runtime=structured`), in English and Ukrainian, with short ids and with two long ones:
+ *
+ *   LLV_SWIPE_BROWSER_TEST=1 bun test src/components/mobile/issue1671Evidence.browser.test.tsx -t "#1846"
+ *
+ * The sheet's row for another account is tapped and the sheet closed; the title line must then name the
+ * account the next message goes to whole, the running account yielding first, and the model with its tier
+ * stays whole on the line under it. The pick sends the conversation's reconfigure and never an engine select.
+ *
+ * Readings go to `evidence/issue-1846/phone-header.json`; frames to `.artifacts/issue-1846/`.
+ */
+const PICK_OUT = path.resolve(".artifacts/issue-1846");
+const PICK_EVIDENCE = path.resolve("evidence/issue-1846");
+const PICK_CASES = [
+  { account: "spare", next: "relief" },
+  { account: "review-relief-2", next: "production-backup-7" },
+] as const;
+
+browserTest("#1846: a pick on the phone names the next account whole on the title line", async () => {
+  fs.mkdirSync(PICK_OUT, { recursive: true });
+  fs.mkdirSync(PICK_EVIDENCE, { recursive: true });
+  const { base: fixtureBase, stop } = await serveFixture();
+  const browser = await launchChromium();
+  const results: unknown[] = [];
+  const failures: string[] = [];
+  try {
+    for (const lang of ["en", "uk"] as const) {
+      for (const { account, next } of PICK_CASES) {
+        const viewport = { width: 390, height: 844 };
+        const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2, colorScheme: "dark" });
+        await context.addInitScript((language) => { localStorage.setItem("llv_lang", language); }, lang);
+        const key = `${lang}-${account}-${next}`;
+        const fail = (label: string) => failures.push(`${key}: ${label}`);
+        try {
+          const page = await context.newPage();
+          const pageErrors: string[] = [];
+          page.on("pageerror", (error) => pageErrors.push(error.message));
+          const cdp = await context.newCDPSession(page);
+          await page.goto(`${fixtureBase}/?account=${account}&next=${next}&runtime=structured#c=conversation_running`);
+          await page.waitForSelector("[data-runtime-pill]", { timeout: 20_000 });
+          await pause(page, 800);
+          const before = await headerReading(page);
+          await tap(page, cdp, "[data-runtime-pill]");
+          await page.waitForSelector(`[data-runtime-sheet-account="${next}"]`, { timeout: 10_000 });
+          await pause(page, 300);
+          await tap(page, cdp, `[data-runtime-sheet-account="${next}"]`);
+          await pause(page, 100);
+          const sheetLine = await page.evaluate(() => document.querySelector("[data-runtime-sheet-account-current]")?.textContent ?? "");
+          await page.screenshot({ path: path.join(PICK_OUT, `phone-${key}-sheet.png`) });
+          await tap(page, cdp, "[data-runtime-sheet-close]");
+          await pause(page, 400);
+          const after = await headerReading(page);
+          const parts = await page.evaluate(() => {
+            const cell = (selector: string) => {
+              const element = document.querySelector(selector);
+              if (!element) return null;
+              const box = element.getBoundingClientRect();
+              /* The text's own width, unrounded: scrollWidth rounds, and hid a cut of under a pixel that still drew an ellipsis. */
+              const range = document.createRange();
+              range.selectNodeContents(element);
+              const need = range.getBoundingClientRect().width;
+              const tag = document.querySelector("[data-mobile2-chat-account]")!.getBoundingClientRect();
+              return {
+                text: element.textContent ?? "",
+                width: Math.round(box.width * 10) / 10,
+                need: Math.round(need * 10) / 10,
+                cut: need > box.width + 0.1,
+                /* On the tag's one line, or wrapped below it where the tag clips it. */
+                shown: box.top >= tag.top - 0.5 && box.bottom <= tag.bottom + 0.5 && box.width > 0,
+              };
+            };
+            return { runs: cell("[data-mobile2-chat-account-runs]"), to: cell("[data-mobile2-chat-account-to]") };
+          });
+          await page.screenshot({ path: path.join(PICK_OUT, `phone-${key}-header.png`) });
+          const sent = await page.evaluate(() => {
+            const evidence = (window as unknown as { evidence: { runtimeRequests: Array<Record<string, unknown>>; accountSelects: unknown[] } }).evidence;
+            return { reconfigures: evidence.runtimeRequests.map((body) => body.accountId ?? null), selects: evidence.accountSelects.length };
+          });
+          results.push({ key, lang, viewport, account, next, before, sheetLine, after, parts, sent, pageErrors });
+          if (!sheetLine.includes(account) || !sheetLine.includes(next)) fail(`the sheet names both accounts: ${sheetLine}`);
+          if (parts.to?.text !== `→ ${next}`) fail(`the title line names the next account: ${JSON.stringify(parts.to)}`);
+          /* The title keeps at least 6rem (critique round 4), so a next id longer than the room left draws its head
+             and yields its tail; one that fits is whole. */
+          if (parts.to?.shown !== true) fail(`the next account is on the line: ${JSON.stringify(parts.to)}`);
+          if (next.length <= 8 && parts.to?.cut !== false) fail(`a short next account is whole: ${JSON.stringify(parts.to)}`);
+          if (parts.to?.cut && parts.to.width < 80) fail(`the next account shows a readable head: ${JSON.stringify(parts.to)}`);
+          if ((after.title?.width ?? 0) < 95.5) fail(`the title keeps its 6rem: ${JSON.stringify(after.title)}`);
+          /* The running account is either whole beside it or not drawn at all — never a sliver. */
+          if (parts.runs?.shown && parts.runs.cut) fail(`the running account shows cut: ${JSON.stringify(parts.runs)}`);
+          if (account.length <= 8 && !parts.runs?.shown) fail(`short ids both fit: ${JSON.stringify(parts.runs)}`);
+          if (after.model?.cut !== false) fail(`the model and its tier are whole: ${JSON.stringify(after.model)}`);
+          if (JSON.stringify(sent.reconfigures) !== JSON.stringify([next]) || sent.selects !== 0) fail(`requests ${JSON.stringify(sent)}`);
+          if (pageErrors.length) fail(`page errors ${pageErrors.join(" | ")}`);
+          await page.close();
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+    stop();
+  }
+  fs.writeFileSync(path.join(PICK_EVIDENCE, "phone-header.json"), `${JSON.stringify({ results, failures }, null, 2)}\n`);
+  if (failures.length) throw new Error(failures.join("\n"));
+}, 300_000);
+
+/*
+ * #1846 at 1280x900 on the deck surface this fixture offers (`&deck=1`, the running conversation as a review
+ * round), in English and Ukrainian, with short ids and with two long ones:
+ *
+ *   LLV_SWIPE_BROWSER_TEST=1 bun test src/components/mobile/issue1671Evidence.browser.test.tsx -t "#1846 desktop"
+ *
+ * The pick is made in the runtime pill's Account panel. On a desktop board the conversation opens in a
+ * kanban reader, which replaces the conversation pane's own header, so the pane's «@ A → B» badge is not
+ * mounted; the reading records that, and reads the header chip the reader does draw, and the pill's mark,
+ * for what each draws against its text.
+ *
+ * Readings go to `evidence/issue-1846/desktop-deck.json`; frames to `.artifacts/issue-1846/`.
+ */
+browserTest("#1846 desktop: the deck surface's account chip at 1280 px names the pick whole", async () => {
+  fs.mkdirSync(PICK_OUT, { recursive: true });
+  fs.mkdirSync(PICK_EVIDENCE, { recursive: true });
+  const { base: fixtureBase, stop } = await serveFixture();
+  const browser = await launchChromium();
+  const results: unknown[] = [];
+  const failures: string[] = [];
+  const reading = (page: Page, selector: string) => page.evaluate((sel) => {
+    const element = document.querySelector<HTMLElement>(sel);
+    if (!element) return null;
+    const box = element.getBoundingClientRect();
+    const overflowing = [element, ...element.querySelectorAll<HTMLElement>("*")]
+      .filter((node) => node.scrollWidth > node.clientWidth + 1)
+      .map((node) => ({ text: node.textContent ?? "", width: node.clientWidth, need: node.scrollWidth }));
+    const pane = element.closest("[data-kanban-reader]")?.getBoundingClientRect() ?? null;
+    return {
+      text: element.textContent?.replace(/\s+/g, " ").trim() ?? "",
+      width: Math.round(box.width * 10) / 10,
+      paneWidth: pane ? Math.round(pane.width * 10) / 10 : null,
+      insidePane: pane ? box.left >= pane.left - 0.5 && box.right <= pane.right + 0.5 : null,
+      overflowing,
+    };
+  }, selector);
+  try {
+    for (const lang of ["en", "uk"] as const) {
+      for (const { account, next } of PICK_CASES) {
+        const viewport = { width: 1_280, height: 900 };
+        const context = await browser.newContext({ viewport, colorScheme: "dark" });
+        await context.addInitScript((language) => { localStorage.setItem("llv_lang", language); }, lang);
+        const key = `desktop-${lang}-${account}-${next}`;
+        const fail = (label: string) => failures.push(`${key}: ${label}`);
+        try {
+          const page = await context.newPage();
+          const pageErrors: string[] = [];
+          page.on("pageerror", (error) => pageErrors.push(error.message));
+          await page.goto(`${fixtureBase}/?account=${account}&next=${next}&runtime=structured&deck=1#c=conversation_running`);
+          await page.waitForSelector("[data-runtime-pill]", { timeout: 20_000 });
+          await pause(page, 800);
+          const before = await reading(page, "[data-kanban-reader] [data-account-trigger]");
+          await page.locator("[data-runtime-pill]").first().evaluate((element) => { element.scrollIntoView({ block: "center" }); (element as HTMLElement).click(); });
+          await page.waitForSelector('[data-runtime-row="submenu"][data-runtime-value="account"]', { timeout: 5_000 });
+          /* Clicked in the page: the reader's composer sits under the portalled popover's hit box in this frame. */
+          await page.locator('[data-runtime-row="submenu"][data-runtime-value="account"]').evaluate((element) => (element as HTMLElement).click());
+          await page.waitForSelector(`[data-runtime-row="account"][data-runtime-value="account-${next}"]`, { timeout: 5_000 });
+          await page.locator(`[data-runtime-row="account"][data-runtime-value="account-${next}"]`).evaluate((element) => (element as HTMLElement).click());
+          await pause(page, 400);
+          const chip = await reading(page, "[data-kanban-reader] [data-account-trigger]");
+          const mark = await reading(page, "[data-runtime-pill-next-account]");
+          const paneBadges = await page.evaluate(() => document.querySelectorAll("[data-conversation-account-chip]").length);
+          await page.screenshot({ path: path.join(PICK_OUT, `${key}.png`) });
+          /* The narrow pane: the same reader held to 426 px, the width a board column gives its reader. */
+          await page.evaluate(() => {
+            const pane = document.querySelector<HTMLElement>("[data-kanban-reader]");
+            if (pane) { pane.style.width = "426px"; pane.style.maxWidth = "426px"; }
+          });
+          await pause(page, 200);
+          const narrow = await reading(page, "[data-kanban-reader] [data-account-trigger]");
+          await page.screenshot({ path: path.join(PICK_OUT, `${key}-narrow.png`) });
+          const sent = await page.evaluate(() => {
+            const evidence = (window as unknown as { evidence: { runtimeRequests: Array<Record<string, unknown>>; accountSelects: unknown[] } }).evidence;
+            return { reconfigures: evidence.runtimeRequests.map((body) => body.accountId ?? null), selects: evidence.accountSelects.length };
+          });
+          results.push({ key, lang, viewport, account, next, before, chip, narrow, mark, paneBadges, sent, pageErrors });
+          if (narrow?.paneWidth !== 426) fail(`the narrow pane is 426 px: ${JSON.stringify(narrow)}`);
+          if (narrow?.insidePane === false) fail(`in the narrow pane the chip leaves it: ${JSON.stringify(narrow)}`);
+          if (!chip?.text.includes(next)) fail(`the reader's header chip names the next account: ${JSON.stringify(chip)}`);
+          if (chip?.insidePane === false) fail(`the chip leaves its pane: ${JSON.stringify(chip)}`);
+          if (!mark?.text.includes(next)) fail(`the pill carries the pick: ${JSON.stringify(mark)}`);
+          if (JSON.stringify(sent.reconfigures) !== JSON.stringify([next]) || sent.selects !== 0) fail(`requests ${JSON.stringify(sent)}`);
+          if (pageErrors.length) fail(`page errors ${pageErrors.join(" | ")}`);
+          await page.close();
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+    stop();
+  }
+  fs.writeFileSync(path.join(PICK_EVIDENCE, "desktop-deck.json"), `${JSON.stringify({ results, failures }, null, 2)}\n`);
+  if (failures.length) throw new Error(failures.join("\n"));
+}, 300_000);

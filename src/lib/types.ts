@@ -347,6 +347,13 @@ export interface FileEntry {
   /** Live per-session migration annotation while an intent drains. Absent for
       every session not currently migrating. */
   migration?: ConversationMigration;
+  /** The failed account switch holding this conversation's messages (#1846):
+      they wait, unsent, until the operator sends them on the account the
+      conversation runs on or picks another account. */
+  switchHold?: { targetAccountId: string; reason: string; since: string };
+  /** The account switch the registry has claimed for this conversation (#1846): a message engaged it and the
+      move is under way, whatever its receipt reads meanwhile, so no surface offers to take it back. */
+  switchApplying?: { operationId: string };
   /** Oldest durable message this live conversation still owes the operator. */
   stuckDelivery?: StuckDelivery;
   /** Durable launch projection shown before its transcript enters the scan. */

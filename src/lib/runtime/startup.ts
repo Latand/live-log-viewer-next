@@ -840,17 +840,14 @@ async function structuredStartupSignals(
     };
   }
   const runtime = await client.snapshot();
+  /* #1846: an account pick waits for the conversation's next engagement, so on its own it is no work that
+     needs a host at startup. Its message, once there is one, is. */
+  const waitingSwitches = new Set<string>();
   const hostedRunningConversationIds = new Set(runtime.sessions
     .filter((session) => session.host === "hosted"
       && (session.turn === "running" || session.turn === "interrupt_requested"))
     .map((session) => canonicalConversationId(registry, session.conversationId)));
-  const pendingOperationConversationIds = new Set(runtime.recentOperations
-    .filter((receipt) => receipt.status === "pending"
-      || receipt.status === "queued"
-      || receipt.status === "delivering"
-      || receipt.status === "applying")
-    .filter((receipt) => receipt.kind !== "kill")
-    .map((receipt) => canonicalConversationId(registry, receipt.conversationId)));
+  const pendingOperationConversationIds = new Set<string>();
   const pendingCodexContinuationConversationIds = new Set<string>();
   const admittedMessages = admittedRuntimeMessages(registry, runtime);
   let afterEventSeq = 0;
@@ -858,6 +855,12 @@ async function structuredStartupSignals(
     const batch = await client.effectBatch(STRUCTURED_HOST_OPERATION_EFFECT_KINDS, afterEventSeq);
     for (const effect of batch) {
       const conversationId = effect.payload.conversationId;
+      if (effect.kind === "runtime.reconfigure"
+        && typeof effect.payload.accountId === "string"
+        && typeof effect.payload.operationId === "string") {
+        waitingSwitches.add(effect.payload.operationId);
+        continue;
+      }
       if (typeof conversationId === "string") {
         const canonicalId = canonicalConversationId(registry, conversationId);
         pendingOperationConversationIds.add(canonicalId);
@@ -874,6 +877,12 @@ async function structuredStartupSignals(
       throw new Error("structured startup operation page did not advance");
     }
     afterEventSeq = next;
+  }
+  for (const receipt of runtime.recentOperations) {
+    if (receipt.status !== "pending" && receipt.status !== "queued" && receipt.status !== "delivering" && receipt.status !== "applying") continue;
+    if (receipt.kind === "kill") continue;
+    if (receipt.kind === "reconfigure" && receipt.status !== "applying" && waitingSwitches.has(receipt.operationId)) continue;
+    pendingOperationConversationIds.add(canonicalConversationId(registry, receipt.conversationId));
   }
   return {
     hostedRunningConversationIds,

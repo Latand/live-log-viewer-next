@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import { readPickedAccount, setPickedAccount, useIntendedAccount } from "@/lib/accounts/intendedAccount";
 import { useLocale, type TFunction } from "@/lib/i18n";
 import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
@@ -21,6 +22,7 @@ import {
   ConversationCancels,
   ConversationSwitches,
   heldCancel,
+  isWaitingPick,
   postSwitchCancel,
   switchCancelTarget,
   type CancelTarget,
@@ -30,6 +32,7 @@ import {
   stageAccountKey,
   stagePin,
   switchView,
+  withLocalPick,
   type AccountEngine,
   type ProjectPolicy,
   type StageAccountOutcome,
@@ -64,7 +67,8 @@ export interface AccountChoice {
   loadPolicy: (project: string, fresh?: boolean) => void;
   chooseStage: (input: { pipelineId: string; stageId: string; stageName: string; account: string | null; labelOf: (id: string) => string }) => void;
   checkStage: (input: { pipelineId: string; stageId: string; stageName: string; labelOf: (id: string) => string }) => void;
-  switchConversation: (input: { file: FileEntry; conversationId: string | null; target: string; targetLabel: string; name: string; working: boolean }) => void;
+  /** Picks where the conversation's next message goes; `target` equal to `current` takes a waiting pick back. */
+  switchConversation: (input: { file: FileEntry; conversationId: string | null; target: string; targetLabel: string; name: string; working: boolean; current?: string }) => void;
   settleSwitch: (key: string, settle: NonNullable<SwitchSettlement>, targetLabel: string, name: string) => void;
   cancels: ConversationCancels;
   /** Cancel a pending switch; with `then`, request that switch once the cancel is confirmed (Change). */
@@ -169,16 +173,41 @@ export function useAccountChoices(ports: PipelinePorts, show: Show, t: TFunction
   const switchConversation = useCallback<AccountChoice["switchConversation"]>((input) => {
     const { file, target, targetLabel, name } = input;
     const key = conversationIdentity(file);
-    if (!switches.begin(key, target)) return;
+    const current = input.current ?? accountIdFromPath(file.path);
+    /* A request still without an answer is the one pick this page may have in flight: nothing is sent twice. */
+    if (switches.get(key)?.phase === "sending") return;
+    /* #1846: the pick is the conversation's intended account. Every account surface shows it in this frame
+       from the shared store, and the conversation moves with its next message; nothing waits for an answer. */
+    const previous = readPickedAccount(key);
+    setPickedAccount(key, target);
+    const restore = () => {
+      if (readPickedAccount(key) === target) setPickedAccount(key, previous);
+    };
     const profile = effectiveProfile(file);
-    void postConversationSwitch({
+    const body = {
       path: file.path,
       conversationId: input.conversationId,
       accountId: target,
       model: profile.model,
       effort: profile.effort,
       ...(file.engine === "codex" ? { fast: profile.fast } : {}),
-    }).then((answer) => {
+    };
+    if (target === current) {
+      /* The account it runs on takes a waiting pick back: nothing moves, and nothing is said on success. */
+      switches.drop(key);
+      void postConversationSwitch(body).then((answer) => {
+        if (answer.kind === "accepted") return;
+        restore();
+        const { show, t } = live.current;
+        show(answer.kind === "refused"
+          ? t("kanban.account.receipt.refused", { account: targetLabel, error: answer.error })
+          : t("kanban.account.receipt.unknown", { account: targetLabel, name }), undefined, { error: true });
+      });
+      return;
+    }
+    switches.drop(key);
+    switches.begin(key, target);
+    void postConversationSwitch(body).then((answer) => {
       const { show, t } = live.current;
       if (answer.kind === "accepted") {
         switches.accept(key, answer.operationId, answer.status);
@@ -189,6 +218,7 @@ export function useAccountChoices(ports: PipelinePorts, show: Show, t: TFunction
         }
       } else if (answer.kind === "refused") {
         switches.drop(key);
+        restore();
         show(t("kanban.account.receipt.refused", { account: targetLabel, error: answer.error }), undefined, { error: true });
       } else {
         /* It may be queued: nothing sends it again. */
@@ -201,6 +231,8 @@ export function useAccountChoices(ports: PipelinePorts, show: Show, t: TFunction
   const settleSwitch = useCallback<AccountChoice["settleSwitch"]>((key, settle, targetLabel, name) => {
     if (!switches.get(key)) return;
     switches.drop(key);
+    /* A failed pick goes back on every surface that showed it. */
+    if (settle.kind === "failed" && readPickedAccount(key) === settle.target) setPickedAccount(key, null);
     const { show, t } = live.current;
     if (settle.kind === "switched") show(t("kanban.account.receipt.switched", { name, account: targetLabel }));
     else show(settle.reason ? t("kanban.account.receipt.failedReason", { name, account: targetLabel, reason: settle.reason }) : t("kanban.account.receipt.failed", { name, account: targetLabel }), undefined, { error: true });
@@ -292,10 +324,24 @@ export function useConversationSwitch(file: FileEntry, session: RuntimeSession |
     ? { operationId: queued.operationId, accountId: queued.accountId ?? null, model: queued.model, effort: queued.effort, status: receiptOf(queued.operationId)?.status ?? null }
     : null;
   const stored = useSyncExternalStore(choice?.cancels.subscribe ?? noSubscribe, () => choice?.cancels.get(key) ?? null, () => null);
-  const input = { current, migration: file.migration, request, receipt: receiptOf(request?.operationId), pending };
+  /* #1846: the pick any account surface on this page made, read from the one store the runtime pill, the
+     card badge and the phone title read too, so they all change in the same frame. */
+  const projectedNext = queued?.accountId && queued.accountId !== current ? queued.accountId : current;
+  const { next } = useIntendedAccount(key, current, queued?.accountId);
+  /* Only a conversation with a runtime session projects picks, and so only there does a pick retire on its own;
+     elsewhere this page's own request is what the board reports. */
+  const localPick = session && next !== projectedNext ? next : null;
+  /* A request of this page that a later pick replaced or took back is over, and says nothing more. */
+  const superseded = Boolean(localPick !== null && request && request.phase !== "sending" && request.target !== localPick);
+  const switches = choice?.switches;
+  useEffect(() => {
+    if (superseded) switches?.drop(key);
+  }, [superseded, switches, key]);
+  const input = { current, migration: file.migration, request: superseded ? null : request, receipt: receiptOf(request?.operationId), pending };
   const cancelTarget = switchCancelTarget(input);
   const subject = cancelSubject(cancelTarget, file.migration);
-  return { key, current, request, cancel: heldCancel(stored, subject), cancelTarget, cancelSubject: subject, ...switchView(input) };
+  const { view, settle } = switchView(input);
+  return { key, current, request, cancel: heldCancel(stored, subject), cancelTarget, cancelSubject: subject, view: withLocalPick(view, current, localPick), settle };
 }
 
 const pendingTarget = (view: SwitchView): string | null => (view.kind === "none" ? null : view.target);
@@ -307,9 +353,11 @@ export function conversationWorking(file: FileEntry, session: RuntimeSession | n
 
 function whenWord(t: TFunction, view: SwitchView, working: boolean): string {
   switch (view.kind) {
-    case "sending": return t("kanban.account.whenSending");
-    /* Behind a running turn it waits for the turn; with none running it is only queued. */
-    case "waiting": return t(working ? "kanban.account.whenTurn" : "kanban.account.whenQueued");
+    /* Optimistic from the first frame (#1846): a refusal corrects it, nothing else is waited for. */
+    case "sending": return t("kanban.account.whenNextMessage");
+    /* A pick nothing has engaged yet moves with the next message (#1846). Once a message engaged it, the
+       migration's record waits behind a running turn, or is only queued with none running. */
+    case "waiting": return t(view.source !== "record" ? "kanban.account.whenNextMessage" : working ? "kanban.account.whenTurn" : "kanban.account.whenQueued");
     case "settings": return t("kanban.account.whenSettings");
     case "switching": return t("kanban.account.whenSwitching");
     case "failed": return t("kanban.account.whenFailed");
@@ -613,8 +661,19 @@ export function ConversationAccountPopover({ anchor, onClose, file, name, stageC
   const outside = accounts.accounts.filter((account) => accountStanding(policy, engine, account.id) === "outside");
   const conversationId = session?.conversationId ?? file.conversationId ?? null;
   /* Cancel and Change exist while the switch can still be cancelled and no cancel of this page is in flight or unanswered. */
-  const canCancel = Boolean(cancelTarget && conversationId && !cancel);
+  /* #1846: a pick still waiting for the next message is replaced by any other pick and taken back by the
+     account it runs on, both as one reconfigure; no cancel has to settle first. */
+  const waitingPick = isWaitingPick(view) && !cancel;
+  const canCancel = waitingPick || Boolean(cancelTarget && conversationId && !cancel);
+  const pick = (account: string, label: string) => {
+    choice.switchConversation({ file, conversationId, target: account, targetLabel: label, name, working, current });
+  };
   const cancelPending = (then: { account: string; label: string } | null) => {
+    if (waitingPick) {
+      onClose(true);
+      pick(then?.account ?? current, then?.label ?? labelOf(current));
+      return;
+    }
     if (!cancelTarget || !subject || !conversationId) return;
     onClose(true);
     choice.cancelSwitch({ file, conversationId, target: cancelTarget, subject, pendingLabel: target ? labelOf(target) : null, name, then: then ? { ...then, working } : null });
@@ -646,7 +705,7 @@ export function ConversationAccountPopover({ anchor, onClose, file, name, stageC
         }
         onClose(true);
         if (isCurrent) return;
-        choice.switchConversation({ file, conversationId, target: account.id, targetLabel: account.label, name, working });
+        pick(account.id, account.label);
       },
     };
   });
@@ -654,7 +713,7 @@ export function ConversationAccountPopover({ anchor, onClose, file, name, stageC
   const pendingText = (() => {
     switch (view.kind) {
       case "sending": return t("kanban.account.pendingSending", { target: targetName });
-      case "waiting": return t(working ? "kanban.account.pendingWaiting" : "kanban.account.pendingQueued", { target: targetName });
+      case "waiting": return t(view.source !== "record" ? "kanban.account.pendingNextMessage" : working ? "kanban.account.pendingWaiting" : "kanban.account.pendingQueued", { target: targetName });
       case "settings": return t("kanban.account.pendingSettings", { model: view.model, effort: view.effort });
       case "switching": return t("kanban.account.pendingSwitching", { target: targetName });
       case "failed": return view.reason ? t("kanban.account.pendingFailedReason", { target: targetName, reason: view.reason }) : t("kanban.account.pendingFailed", { target: targetName });
@@ -671,7 +730,7 @@ export function ConversationAccountPopover({ anchor, onClose, file, name, stageC
     view.kind === "settings" ? t("kanban.account.settingsNote") : null,
     cancel?.phase === "unknown" ? t("kanban.account.cancelUnknownNote") : null,
     /* A switch the queue is applying, or past waiting for its turn, can no longer be cancelled. */
-    (view.kind === "waiting" || view.kind === "switching") && !cancelTarget && !cancel ? t("kanban.account.tooLateNote") : null,
+    (view.kind === "waiting" || view.kind === "switching") && !cancelTarget && !cancel && !waitingPick ? t("kanban.account.tooLateNote") : null,
   ].filter((note): note is string => Boolean(note));
 
   return (
@@ -699,7 +758,7 @@ export function ConversationAccountPopover({ anchor, onClose, file, name, stageC
             <span className="k">{t("kanban.account.pending")}</span>
             <span className="v">{cancelText ?? pendingText}</span>
             {canCancel ? (
-              <button type="button" className="btn quiet" data-account-cancel={cancelTarget!.action} onClick={() => cancelPending(null)}>
+              <button type="button" className="btn quiet" data-account-cancel={waitingPick ? "pick" : cancelTarget!.action} onClick={() => cancelPending(null)}>
                 {t("kanban.account.cancelSwitch")}
               </button>
             ) : null}

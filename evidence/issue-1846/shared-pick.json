@@ -1,0 +1,281 @@
+{
+  "passes": [
+    {
+      "lang": "en",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "before": "Account A",
+      "pillPick": {
+        "ms": 14,
+        "chip": "Account A → Account C with the next message",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMark": {
+        "text": "→ Account C",
+        "width": 63.5,
+        "inView": true,
+        "cut": false
+      },
+      "boardChip": {
+        "text": "Account A→Account Cwith the next message",
+        "width": 250.8,
+        "inView": true,
+        "cut": false
+      },
+      "readerChip": {
+        "text": "Account A→Account Cwith the next message",
+        "width": 250.8,
+        "inView": true,
+        "cut": false
+      },
+      "readerWidth": 426,
+      "paneBadges": 0,
+      "pickerAfterPillPick": {
+        "pending": "Account C · moves with the next message",
+        "source": "pick",
+        "checked": [
+          "account-c"
+        ]
+      },
+      "boardTakeBack": {
+        "ms": 28.8,
+        "chip": "Account A",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMarkAfterTakeBack": null,
+      "pillAfterBoardTakeBack": "runs on Account A",
+      "boardPick": {
+        "ms": 19.4,
+        "chip": "Account A → Account C with the next message",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillHead": {
+        "before": "runs on Account A",
+        "after": "runs on Account A · next on Account C"
+      },
+      "requests": {
+        "pill": [
+          "account-c"
+        ],
+        "board": [
+          "default",
+          "account-c"
+        ],
+        "migrations": 0
+      }
+    },
+    {
+      "lang": "uk",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "before": "Account A",
+      "pillPick": {
+        "ms": 16.7,
+        "chip": "Account A → Account C з наступним повідомленням",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMark": {
+        "text": "→ Account C",
+        "width": 63.5,
+        "inView": true,
+        "cut": false
+      },
+      "boardChip": {
+        "text": "Account A→Account Cз наступним повідомленням",
+        "width": 286.3,
+        "inView": true,
+        "cut": false
+      },
+      "readerChip": {
+        "text": "Account A→Account Cз наступним повідомленням",
+        "width": 286.3,
+        "inView": true,
+        "cut": false
+      },
+      "readerWidth": 426,
+      "paneBadges": 0,
+      "pickerAfterPillPick": {
+        "pending": "Account C · перейде з наступним повідомленням",
+        "source": "pick",
+        "checked": [
+          "account-c"
+        ]
+      },
+      "boardTakeBack": {
+        "ms": 39,
+        "chip": "Account A",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMarkAfterTakeBack": null,
+      "pillAfterBoardTakeBack": "працює на Account A",
+      "boardPick": {
+        "ms": 26.5,
+        "chip": "Account A → Account C з наступним повідомленням",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillHead": {
+        "before": "працює на Account A",
+        "after": "працює на Account A · далі на Account C"
+      },
+      "requests": {
+        "pill": [
+          "account-c"
+        ],
+        "board": [
+          "default",
+          "account-c"
+        ],
+        "migrations": 0
+      }
+    },
+    {
+      "lang": "en",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "before": "Account A",
+      "pillPick": {
+        "ms": 18.3,
+        "chip": "Account A → Account C with the next message",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMark": {
+        "text": "→ Account C",
+        "width": 63.5,
+        "inView": true,
+        "cut": false
+      },
+      "boardChip": {
+        "text": "Account A→Account Cwith the next message",
+        "width": 250.8,
+        "inView": true,
+        "cut": false
+      },
+      "readerChip": {
+        "text": "Account A→Account Cwith the next message",
+        "width": 250.8,
+        "inView": true,
+        "cut": false
+      },
+      "readerWidth": 426,
+      "paneBadges": 0,
+      "pickerAfterPillPick": {
+        "pending": "Account C · moves with the next message",
+        "source": "pick",
+        "checked": [
+          "account-c"
+        ]
+      },
+      "boardTakeBack": {
+        "ms": 27.3,
+        "chip": "Account A",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMarkAfterTakeBack": null,
+      "pillAfterBoardTakeBack": "runs on Account A",
+      "boardPick": {
+        "ms": 17.7,
+        "chip": "Account A → Account C with the next message",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillHead": {
+        "before": "runs on Account A",
+        "after": "runs on Account A · next on Account C"
+      },
+      "requests": {
+        "pill": [
+          "account-c"
+        ],
+        "board": [
+          "default",
+          "account-c"
+        ],
+        "migrations": 0
+      }
+    },
+    {
+      "lang": "uk",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "before": "Account A",
+      "pillPick": {
+        "ms": 16.3,
+        "chip": "Account A → Account C з наступним повідомленням",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMark": {
+        "text": "→ Account C",
+        "width": 63.5,
+        "inView": true,
+        "cut": false
+      },
+      "boardChip": {
+        "text": "Account A→Account Cз наступним повідомленням",
+        "width": 286.3,
+        "inView": true,
+        "cut": false
+      },
+      "readerChip": {
+        "text": "Account A→Account Cз наступним повідомленням",
+        "width": 286.3,
+        "inView": true,
+        "cut": false
+      },
+      "readerWidth": 426,
+      "paneBadges": 0,
+      "pickerAfterPillPick": {
+        "pending": "Account C · перейде з наступним повідомленням",
+        "source": "pick",
+        "checked": [
+          "account-c"
+        ]
+      },
+      "boardTakeBack": {
+        "ms": 27.1,
+        "chip": "Account A",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillMarkAfterTakeBack": null,
+      "pillAfterBoardTakeBack": "працює на Account A",
+      "boardPick": {
+        "ms": 18.1,
+        "chip": "Account A → Account C з наступним повідомленням",
+        "pillHead": "",
+        "pickerPending": ""
+      },
+      "pillHead": {
+        "before": "працює на Account A",
+        "after": "працює на Account A · далі на Account C"
+      },
+      "requests": {
+        "pill": [
+          "account-c"
+        ],
+        "board": [
+          "default",
+          "account-c"
+        ],
+        "migrations": 0
+      }
+    }
+  ],
+  "failures": []
+}

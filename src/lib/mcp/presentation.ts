@@ -403,7 +403,7 @@ export function describeMcpCall(
   if (toolName === "conversation_migration") {
     const conversationId = string(result.conversationId) || string(args.conversationId);
     const action = string(args.action);
-    const verbs: Record<string, string> = { reseat: "Reseating", retry: "Retrying", rollback: "Rolling back", cancel: "Cancelling", withdraw: "Withdrawing" };
+    const verbs: Record<string, string> = { reseat: "Reseating", retry: "Retrying", rollback: "Rolling back", cancel: "Cancelling", withdraw: "Withdrawing", "keep-current": "Releasing held messages of" };
     const verb = verbs[action] ?? "Migrating";
     return {
       icon: "conversation",

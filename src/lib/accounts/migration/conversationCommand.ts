@@ -13,6 +13,7 @@ import { headCwd } from "@/lib/agent/transcript";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import type { RuntimeOperationResult } from "@/lib/runtime/contracts";
 import { kickStructuredDeliveryQueue } from "@/lib/runtime/structuredDeliverySignal";
+import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
 
 import { advanceConversationMigration, drainHeldDeliveries, type HeldDeliveryPort } from "./coordinator";
 import { createMigrationDeliveryPort } from "./deliveryPort";
@@ -42,6 +43,8 @@ export interface ConversationMigrationCommandDependencies {
   operationStatus?: (operationId: string) => Promise<RuntimeOperationResult | null | "unreadable">;
   /** Wakes the structured delivery queue so a cancelled reconfigure settles now. */
   kick?: () => void | Promise<void>;
+  /** Records a structured conversation's intended account (#1846). */
+  dispatchControl?: typeof dispatchStructuredControl;
 }
 
 /* Receipt statuses after which an operation is settled in the journal. */
@@ -144,6 +147,30 @@ export async function applyConversationMigration(
       };
     }
     const target = selection.target;
+    /* #1846: a structured conversation's reseat is the same account pick the operator makes. It records the
+       intended account, and the conversation moves when it is next engaged, through the same rebind. */
+    const profile = source.launchProfile;
+    const intended = profile.model && profile.effort
+      ? await (dependencies.dispatchControl ?? dispatchStructuredControl)({
+          path: source.path,
+          conversationId,
+          action: "reconfigure",
+          reconfiguration: { model: profile.model, effort: profile.effort, fast: profile.fast, accountId: target.accountId },
+        }, { registry })
+      : null;
+    if (intended) {
+      if (intended.status >= 400) return { status: intended.status, body: intended.body as Record<string, unknown> };
+      return {
+        status: 200,
+        body: {
+          reseat: "intended",
+          targetId: target.accountId,
+          targetLabel: target.label,
+          operationId: "operationId" in intended.body ? intended.body.operationId : null,
+          conversation: registry.conversation(conversationId) ?? conversation,
+        },
+      };
+    }
     const requested = registry.requestConversationReseat(conversationId, target.accountId);
     let final = requested;
     if (requested.migration) {
@@ -211,6 +238,15 @@ export async function applyConversationMigration(
     /* The withdrawal is durable; the queue notices it on its next pass even if this kick fails. */
     await settleAfterCommit(() => (dependencies.kick ?? kickStructuredDeliveryQueue)());
     return { status: 200, body: { withdraw: withdrawal.kind, conversation: withdrawal.conversation } };
+  }
+
+  if (command.action === "keep-current") {
+    /* #1846: messages a failed account switch held go out on the account the conversation runs on. */
+    const registry = registryForCommand();
+    if (!registry.conversation(conversationId)) return { status: 404, body: { error: "viewer conversation is unknown" } };
+    const { released, conversation } = registry.releaseSwitchHold(conversationId);
+    await settleAfterCommit(() => (dependencies.kick ?? kickStructuredDeliveryQueue)());
+    return { status: 200, body: { keepCurrent: released ? "released" : "nothing-held", conversation } };
   }
 
   if (!Number.isInteger(command.expectedRevision) || (command.expectedRevision as number) < 0) {

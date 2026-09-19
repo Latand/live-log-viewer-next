@@ -78,7 +78,7 @@ import {
   reconcileComposerReceipt,
   withComposerAdmissionDeadline,
 } from "./composerAdmissionDeadline";
-import { RuntimePill } from "./RuntimePill";
+import { RuntimePill, RuntimeSwitchHold } from "./RuntimePill";
 import { observedModelId, savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingAttachment, type PendingFile, type PendingImage, type RestoredFile } from "./imageAttachments";
 import {
@@ -3965,6 +3965,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     </div>
   ) : null;
 
+  /* #1846: a message held by a failed account move gets its own line above the row, with its two ways on. */
+  const switchHeld = caps.surface === "structured" && file.switchHold ? <RuntimeSwitchHold file={file} /> : null;
+
   const payloadRecovery = hasPayloadRecovery ? (
     <section data-testid="composer-payload-recovery" className="flex flex-col gap-2 text-caption" aria-label={t("composer.payloadRecovery")}>
       {payloadStorageError ? <p role="alert">{payloadStorageError}</p> : null}
@@ -4205,7 +4208,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          forces a fresh runtime snapshot, which resolves an unresolved host,
          surfaces a recovered one, and reconciles a timed-out admission. */
       onSendBlockedRecover={() => void runtimeDependencies.refreshRuntime()}
-      receipts={payloadRecovery || displayedRuntimeReceipts.length ? <>{payloadRecovery}{
+      receipts={switchHeld || payloadRecovery || displayedRuntimeReceipts.length ? <>{switchHeld}{payloadRecovery}{
         displayedRuntimeReceipts.length
           ? <RuntimeComposerReceipts
               receipts={displayedRuntimeReceipts}

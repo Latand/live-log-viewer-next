@@ -1,0 +1,189 @@
+{
+  "results": [
+    {
+      "key": "desktop-en-spare-relief",
+      "lang": "en",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "account": "spare",
+      "next": "relief",
+      "before": {
+        "text": "spare",
+        "width": 54.4,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "chip": {
+        "text": "spare→reliefwith the next message",
+        "width": 204.9,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "narrow": {
+        "text": "spare→reliefwith the next message",
+        "width": 204.9,
+        "paneWidth": 426,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "mark": {
+        "text": "→ relief",
+        "width": 37.7,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "paneBadges": 0,
+      "sent": {
+        "reconfigures": [
+          "relief"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    },
+    {
+      "key": "desktop-en-review-relief-2-production-backup-7",
+      "lang": "en",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "account": "review-relief-2",
+      "next": "production-backup-7",
+      "before": {
+        "text": "review-relief-2",
+        "width": 95.5,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "chip": {
+        "text": "review-relief-2→production-backup-7with the next message",
+        "width": 321.9,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "narrow": {
+        "text": "review-relief-2→production-backup-7with the next message",
+        "width": 321.9,
+        "paneWidth": 426,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "mark": {
+        "text": "→ production-backup-7",
+        "width": 118.7,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "paneBadges": 0,
+      "sent": {
+        "reconfigures": [
+          "production-backup-7"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    },
+    {
+      "key": "desktop-uk-spare-relief",
+      "lang": "uk",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "account": "spare",
+      "next": "relief",
+      "before": {
+        "text": "spare",
+        "width": 54.4,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "chip": {
+        "text": "spare→reliefз наступним повідомленням",
+        "width": 240.4,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "narrow": {
+        "text": "spare→reliefз наступним повідомленням",
+        "width": 240.4,
+        "paneWidth": 426,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "mark": {
+        "text": "→ relief",
+        "width": 37.7,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "paneBadges": 0,
+      "sent": {
+        "reconfigures": [
+          "relief"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    },
+    {
+      "key": "desktop-uk-review-relief-2-production-backup-7",
+      "lang": "uk",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "account": "review-relief-2",
+      "next": "production-backup-7",
+      "before": {
+        "text": "review-relief-2",
+        "width": 95.5,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "chip": {
+        "text": "review-relief-2→production-backup-7з наступним повідомленням",
+        "width": 357.4,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "narrow": {
+        "text": "review-relief-2→production-backup-7з наступним повідомленням",
+        "width": 357.4,
+        "paneWidth": 426,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "mark": {
+        "text": "→ production-backup-7",
+        "width": 118.7,
+        "paneWidth": 1100,
+        "insidePane": true,
+        "overflowing": []
+      },
+      "paneBadges": 0,
+      "sent": {
+        "reconfigures": [
+          "production-backup-7"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    }
+  ],
+  "failures": []
+}

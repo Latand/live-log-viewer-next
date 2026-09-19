@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 import type { PatchPipelineRequest, Pipeline } from "@/lib/pipelines/types";
 import type { ConversationMigration } from "@/lib/types";
@@ -9,6 +9,7 @@ import {
   RUNTIME_HOST_UNAVAILABLE_CODE,
   accountStanding,
   cancelSubject,
+  withLocalPick,
   ConversationCancels,
   ConversationSwitches,
   heldCancel,
@@ -292,4 +293,22 @@ test("a cancel's answer: done on 200, refused on a 4xx or the pre-write 503, unk
   expect(cancels.begin("conversation_a", "account-g", later!)).toBe(true);
   expect(cancels.begin("conversation_a", "account-g", subject)).toBe(false);
   expect(cancelSubject({ action: "withdraw", operationId: "op-1" }, null)).toBe("operation:op-1");
+});
+
+describe("withLocalPick (#1846)", () => {
+  const waitingRecord = { kind: "waiting", target: "c", source: "record" } as const;
+  test("a pick shows as waiting for the next message before any answer, and the running account reads as no switch", () => {
+    expect(withLocalPick({ kind: "none" }, "a", "b")).toEqual({ kind: "waiting", target: "b", source: "pick" });
+    expect(withLocalPick({ kind: "sending", target: "b" }, "a", "b")).toEqual({ kind: "waiting", target: "b", source: "pick" });
+    expect(withLocalPick({ kind: "waiting", target: "b", source: "runtime" }, "a", "a")).toEqual({ kind: "none" });
+    expect(withLocalPick({ kind: "waiting", target: "b", source: "runtime" }, "a", "c")).toEqual({ kind: "waiting", target: "c", source: "pick" });
+  });
+  test("what a message already engaged, and a view that already names the pick, stay as they are", () => {
+    expect(withLocalPick(waitingRecord, "a", "b")).toBe(waitingRecord);
+    const switching = { kind: "switching", target: "c", source: "runtime" } as const;
+    expect(withLocalPick(switching, "a", "a")).toBe(switching);
+    const unknown = { kind: "unknown", target: "b" } as const;
+    expect(withLocalPick(unknown, "a", "b")).toBe(unknown);
+    expect(withLocalPick(unknown, "a", null)).toBe(unknown);
+  });
 });

@@ -65,7 +65,9 @@ interface SendResponse {
   filePaths?: string[];
   /** Set when the message booted a fresh agent host instead of reaching a live one. */
   spawned?: boolean;
-  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured" | "queued" | "delivering" | "delivered";
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured" | "queued" | "delivering" | "delivered" | "withdrawn";
+  /** `withdrawn`: the account pick a reconfigure took back (#1846), or null when none was waiting. */
+  withdrawn?: string | null;
   structured?: true;
   operationId?: string;
   receipt?: { operationId: string; status: string };

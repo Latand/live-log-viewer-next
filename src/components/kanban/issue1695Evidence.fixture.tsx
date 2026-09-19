@@ -46,6 +46,9 @@ const TIER_LIMITS = SCENARIO === "tier-limits" || CODENAME_TIERS;
 const ACCOUNTS = SCENARIO === "accounts" || TIER_LIMITS;
 const STAGES = SCENARIO === "stages" || ACCOUNTS;
 const PIPELINES = SCENARIO === "pipelines" || STAGES;
+/* #1846: `&runtime=structured` answers the runtime snapshot with one structured session, for the running
+   verify conversation, so its composer's runtime pill and the board's account chip both draw. */
+const STRUCTURED = new URLSearchParams(location.search).get("runtime") === "structured";
 /* Review round 2 of #1712: a conversation no card holds, whose reader takes the window. */
 const LOOSE = SCENARIO === "loose";
 /* #1765: one task carrying five pipelines — two running, three completed — so
@@ -137,6 +140,20 @@ const searchImpl2 = add(conversation("search-impl-2", "Swap the alias only after
 const searchRev = add(conversation("search-rev", "Review the warm-up gate", { mtime: now - 41 * MIN, engine: "codex", model: "gpt-5.6" }));
 const searchVer1 = add(conversation("search-ver-1", "Results empty for 40 s after the swap", { mtime: now - 90 * MIN }));
 const searchVer2 = add(conversation("search-ver-2", "Re-running the rebuild with traffic", working({ plan: { current: "Re-running the rebuild with traffic" } })));
+
+/** The runtime snapshot `&runtime=structured` answers: the verify conversation on a structured host, mid-turn. */
+function structuredSnapshot() {
+  return {
+    schemaVersion: 1, snapshotSeq: 1, retentionFloorSeq: 0, structuredHostsEnabled: true, runtime: { hostEpoch: 1, health: "ready" }, filesRevision: 1,
+    sessions: [{
+      conversationId: searchVer2.conversationId, sessionKey: { engine: "claude", sessionId: "search-ver-2-session" }, hostKind: "claude-broker", host: "hosted",
+      turn: "running", provenance: "structured", revision: 1, attentionIds: [], recentReceipts: [], accountId: "default",
+      parentConversationId: null, flowId: null, workflowId: null, cwd: "/repo", artifactPath: searchVer2.path,
+      capabilities: { steer: false, structuredAttention: true }, activeTurnId: "turn-1", pendingReconfigure: null,
+    }],
+    attentions: [], recentOperations: [], edges: [], flows: [], workflows: [], tasks: [], deployments: [],
+  };
+}
 /* t-upload: an eight-stage chain, the UI builder working. */
 const uploadPlan = add(conversation("upload-plan", "Plan: 8 MB chunks, resume token per file", { mtime: now - 8 * 60 * MIN }));
 const uploadApi = add(conversation("upload-api", "Endpoint and resume token in place", { mtime: now - 6 * 60 * MIN, engine: "codex", model: "gpt-5.6" }));
@@ -775,6 +792,8 @@ const evidence = {
   },
   /* K6: conversation account switches the board sent, in order. */
   accountRequests: [] as Array<Record<string, unknown>>,
+  /* Reconfigures the runtime pill sent (#1846). */
+  pillRequests: [] as Array<Record<string, unknown>>,
   accountAnswerDelayMs: 200,
   /* The next switch is refused with these words. */
   refuseNextAccountRequest: null as { status: number; error: string } | null,
@@ -911,7 +930,12 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (!url.searchParams.get("deviceId")) return json({ ok: true, records });
     return json({ ok: true, rootId: "root-fixture", offer: null, live: [], expired: [], records });
   }
+  if (url.pathname === "/api/runtime/snapshot" && STRUCTURED) return json(structuredSnapshot());
   if (url.pathname === "/api/runtime/snapshot") return json({ code: RUNTIME_PLANE_ABSENT }, 503);
+  if (STRUCTURED && url.pathname === "/api/tmux" && method === "POST") {
+    evidence.pillRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return json({ ok: true, structured: true });
+  }
   if (url.pathname === "/api/board") {
     if (method === "PATCH") {
       const body = JSON.parse(String(init?.body)) as { mutations?: BoardMutationV1[] };

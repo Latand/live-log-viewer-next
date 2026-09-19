@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { Check, ChevronDown, Loader2 } from "@/components/icons";
+import { Check, ChevronDown } from "@/components/icons";
 import { type AccountAuthHealth, useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { accountIdFromPath } from "@/lib/accounts/badge";
+import { conversationIdentity } from "@/lib/accounts/identity";
+import { pickApplying, readPickedAccount, setPickedAccount, useIntendedAccount } from "@/lib/accounts/intendedAccount";
 import { requestAccountPanel } from "@/lib/accounts/openPanel";
 import { type MessageKey, type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -89,65 +91,42 @@ export function AccountBadge({
   const isMobile = useIsMobile();
   const accounts = useEngineAccounts(engine);
   const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState(false);
   /* The menu renders through a portal with fixed positioning: card headers
      clip overflow, so an in-flow absolute menu was cut off and unreachable. */
   const [menuPosition, setMenuPosition] = useState<{ top: number; right: number } | null>(null);
   const anchorRef = useRef<HTMLSpanElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const operationRef = useRef<string | null>(null);
-  const targetAccountRef = useRef<string | null>(null);
   const migrationBaselineRef = useRef<string | null>(null);
+  /* #1846: a pick is the conversation's intended account, shown here and on every other account surface in
+     the same frame, and the conversation moves with its next message. Nothing waits for a confirmation. */
+  const key = file ? conversationIdentity(file) : accountId;
+  const { next } = useIntendedAccount(key, accountId, runtimeSession?.pendingReconfigure?.accountId);
+  const moving = Boolean(file) && next !== accountId;
+  /* A pick a message already engaged is moving the conversation: too late to take back (#1846 review). */
+  const switching = moving && pickApplying(runtimeSession, file);
   const tint = accountTint(accountId);
   const health = healthOf(accounts.accounts.find((account) => account.id === accountId));
-  const label = hintLabel(t, accountId, engine, health);
+  /* The pick is named by the labels the menu rows use, as every other account surface names it (#1846). */
+  const nameOf = (id: string) => accounts.accounts.find((account) => account.id === id)?.label || id;
+  const runsOnNext = t("mobile2.composer.accountRunsOnNext", { account: nameOf(accountId), next: nameOf(next) });
+  const label = moving
+    ? `${hintLabel(t, accountId, engine, health)} · ${runsOnNext}`
+    : hintLabel(t, accountId, engine, health);
   const aria = t("branch.accountAria", { id: accountId });
 
+  /* A conversation off the structured transport moves through the migration drain at once, and says so
+     only when that move failed: the pick goes back and the reason is told. */
   useEffect(() => {
-    const operationId = operationRef.current;
-    if (!operationId) return;
-    const receipt = runtimeSession?.recentReceipts.find((candidate) =>
-      candidate.operationId === operationId && candidate.kind === "reconfigure");
-    if (!receipt) return;
-    if (receipt.status === "applied") {
-      operationRef.current = null;
-      targetAccountRef.current = null;
-      migrationBaselineRef.current = null;
-      setPending(false);
-      pushTaskToast("ok", t("accounts.conversationApplied"));
-    } else if (receipt.status === "failed" || receipt.status === "rejected") {
-      operationRef.current = null;
-      targetAccountRef.current = null;
-      migrationBaselineRef.current = null;
-      setPending(false);
-      pushTaskToast("err", receipt.reason ?? t("accounts.switchFailed"));
-    }
-  }, [runtimeSession, t]);
-
-  useEffect(() => {
-    if (!pending || targetAccountRef.current !== accountId) return;
-    targetAccountRef.current = null;
-    operationRef.current = null;
+    const migration = file?.migration;
+    const picked = readPickedAccount(key);
+    if (!picked
+      || !migration?.failure
+      || migration.targetAccountId !== picked
+      || migrationProjectionKey(migration) === migrationBaselineRef.current) return;
     migrationBaselineRef.current = null;
-    setPending(false);
-    pushTaskToast("ok", t("accounts.conversationApplied"));
-  }, [accountId, pending, t]);
-
-  /* Confirmation flows through runtime receipts and the migration projection —
-     both go silent when the conversation's host is dead (a session-limit stop,
-     a crashed pane). Without this escape a switch attempt on such a card left
-     `pending` stuck forever and every menu item disabled. */
-  useEffect(() => {
-    if (!pending) return;
-    const timer = window.setTimeout(() => {
-      operationRef.current = null;
-      targetAccountRef.current = null;
-      migrationBaselineRef.current = null;
-      setPending(false);
-      pushTaskToast("err", t("accounts.conversationUnconfirmed"));
-    }, 60_000);
-    return () => window.clearTimeout(timer);
-  }, [pending, t]);
+    setPickedAccount(key, null);
+    pushTaskToast("err", migration.failure);
+  }, [file?.migration, key]);
 
   /* Portal menu closes on any press outside the chip or the menu itself. */
   useEffect(() => {
@@ -169,25 +148,12 @@ export function AccountBadge({
     setOpen((value) => !value);
   };
 
-  useEffect(() => {
-    const migration = file?.migration;
-    const targetAccountId = targetAccountRef.current;
-    if (!pending
-      || operationRef.current
-      || !migration?.failure
-      || migration.targetAccountId !== targetAccountId
-      || migrationProjectionKey(migration) === migrationBaselineRef.current) return;
-    targetAccountRef.current = null;
-    migrationBaselineRef.current = null;
-    setPending(false);
-    pushTaskToast("err", migration.failure);
-  }, [file?.migration, pending]);
-
+  /** Picks where the next message goes; picking the account it runs on takes a waiting pick back. */
   const switchConversation = async (targetId: string) => {
-    if (!file || targetId === accountId || pending) return;
-    setPending(true);
+    if (!file || targetId === next || (switching && targetId === accountId)) return;
+    const previous = readPickedAccount(key);
+    setPickedAccount(key, targetId);
     setOpen(false);
-    targetAccountRef.current = targetId;
     migrationBaselineRef.current = migrationProjectionKey(file.migration);
     try {
       const profile = effectiveProfile(file);
@@ -206,8 +172,6 @@ export function AccountBadge({
       });
       const body = await response.json() as {
         ok?: boolean;
-        operationId?: string;
-        receipt?: { operationId: string; status: string };
         error?: string;
         accountOverride?: { outsidePool?: boolean; recorded?: boolean };
       };
@@ -226,13 +190,8 @@ export function AccountBadge({
             : "accounts.switchedOutsidePool"),
         );
       }
-      if (targetAccountRef.current === targetId) {
-        operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
-      }
     } catch (error) {
-      targetAccountRef.current = null;
-      migrationBaselineRef.current = null;
-      setPending(false);
+      if (readPickedAccount(key) === targetId) setPickedAccount(key, previous);
       pushTaskToast("err", error instanceof Error ? error.message : t("accounts.switchFailed"));
     }
   };
@@ -244,8 +203,8 @@ export function AccountBadge({
       aria-label={aria}
       aria-haspopup={file ? "menu" : undefined}
       aria-expanded={file ? open : undefined}
-      aria-busy={pending || undefined}
       data-conversation-account-chip
+      data-conversation-account-next={moving ? next : undefined}
       className={isMobile
         ? "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         : "inline-flex shrink-0 items-center gap-1 rounded-full border border-border/80 px-1.5 py-0.5 font-mono text-[9.5px] text-muted hover:border-accent/45 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"}
@@ -256,13 +215,14 @@ export function AccountBadge({
           style={{ backgroundColor: tint.circleBg, color: tint.dot }}
           aria-hidden
         >
-          {pending ? <Loader2 className="h-3 w-3 animate-spin" /> : accountId.charAt(0)}
+          {accountId.charAt(0)}
         </span>
       ) : (
         <>
           <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: tint.dot }} aria-hidden />
-          <span>@ {truncateId(accountId)}</span>
-          {pending ? <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden /> : file ? <ChevronDown className="h-2.5 w-2.5" aria-hidden /> : null}
+          <span>@ {truncateId(nameOf(accountId))}</span>
+          {moving ? <span className="text-accent">→ {truncateId(nameOf(next))}</span> : null}
+          {file ? <ChevronDown className="h-2.5 w-2.5" aria-hidden /> : null}
         </>
       )}
     </button>
@@ -282,18 +242,30 @@ export function AccountBadge({
       </div>
       {accounts.accounts.map((account) => {
         const available = account.authPresent && !account.loginPending;
+        /* While a pick waits, the account it runs on is the way back (#1846); not once the move is under way. */
+        const leaving = moving && account.id === accountId;
+        const cancels = leaving && !switching;
         return (
           <button
             key={account.id}
             type="button"
             role="menuitemradio"
-            aria-checked={account.id === accountId}
-            disabled={!available || pending}
+            aria-checked={account.id === next}
+            disabled={(leaving && switching) || (!available && !cancels)}
             onClick={() => void switchConversation(account.id)}
             className="flex min-h-9 w-full items-center gap-2 rounded-control px-2 py-1.5 text-left hover:bg-sunken disabled:opacity-45"
           >
             <span className="min-w-0 flex-1 truncate">{account.label}</span>
-            {account.id === accountId ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}
+            {cancels ? (
+              <span className="shrink-0 text-[11px] font-semibold text-accent" data-conversation-account-cancel>
+                {t("mobile2.composer.accountCancelSwitch")}
+              </span>
+            ) : leaving ? (
+              <span className="shrink-0 text-[11px] font-semibold text-muted" data-conversation-account-switching>
+                {t("mobile2.composer.accountSwitching")}
+              </span>
+            ) : null}
+            {account.id === next ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}
           </button>
         );
       })}
@@ -313,7 +285,9 @@ export function AccountBadge({
     <span ref={anchorRef} className="relative inline-flex" onPointerDown={(event) => event.stopPropagation()}>
       <Hint label={label}>{button}</Hint>
       {menu}
-      {pending ? <span className="sr-only" role="status">{t("accounts.conversationPending")}</span> : null}
+      {moving ? (
+        <span className="sr-only" role="status">{runsOnNext}</span>
+      ) : null}
     </span>
   );
 }

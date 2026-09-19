@@ -117,6 +117,8 @@ afterAll(() => {
 const { flushSync } = await import("react-dom");
 const { createRoot } = await import("react-dom/client");
 const { KanbanBoard } = await import("./KanbanBoard");
+const { readPickedAccount, resetPickedAccountsForTests, setPickedAccount } = await import("@/lib/accounts/intendedAccount");
+const { conversationIdentity } = await import("@/lib/accounts/identity");
 
 const roots: Root[] = [];
 afterEach(() => {
@@ -127,6 +129,7 @@ afterEach(() => {
   migrationRequests.length = 0;
   hostAnswer = "queued";
   runtimeState = inertRuntimeState();
+  resetPickedAccountsForTests();
 });
 
 const REV = (n: number) => ["task-v1:00000000", "0000", "4000", "8000", String(n).padStart(12, "0")].join("-");
@@ -295,22 +298,24 @@ function installRuntime(pending: { operationId: string; accountId: string | null
   for (const listener of runtimeListeners) flushSync(() => listener());
 }
 
-test("a switch another page queued, with no receipt on this page, is shown here and can only be cancelled or changed through its operation, never simply replaced", async () => {
+test("a pick another page queued is shown here, and a pick made here replaces it with no cancel first", async () => {
   installRuntime({ operationId: "op-elsewhere", accountId: "account-g" });
   const { host } = mount(searchPipeline());
   await tick();
   await openVerify(host);
-  expect(chipText(conversationChip(host))).toBe("Account A → Account G after this turn");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account G with the next message");
   await openPicker(host);
-  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · waits for the current turn to end"]);
+  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · moves with the next message"]);
   expect(picker(host)!.querySelector("[data-account-pending]")?.getAttribute("data-account-source")).toBe("runtime");
   /* Not this page's alone: the runtime session reports it for every page. */
   expect(notes(host)).not.toContain("Known to this page only. A reload or another page won't show this switch until the server records it.");
-  expect(picker(host)!.querySelector("[data-account-cancel]")?.getAttribute("data-account-cancel")).toBe("withdraw");
-  /* Change: the other page's switch is withdrawn by its operation before anything new is asked for. */
+  /* #1846: a pick still waiting for the next message is replaced by another pick, which the queue supersedes;
+     no cancel has to settle before it. */
+  expect(picker(host)!.querySelector("[data-account-cancel]")?.getAttribute("data-account-cancel")).toBe("pick");
   click(row(host, "account-c"));
+  expect(chipText(conversationChip(host))).toBe("Account A → Account C with the next message");
   await tick(40);
-  expect(migrationRequests).toEqual([{ action: "withdraw", operationId: "op-elsewhere" }]);
+  expect(migrationRequests).toEqual([]);
   expect(hostRequests.map((body) => body.accountId)).toEqual(["account-c"]);
 });
 
@@ -341,10 +346,10 @@ test("a superseded switch does not clear the newer target, and the migration rec
   const { host, update } = mount(searchPipeline());
   await tick();
   await openVerify(host);
-  expect(chipText(conversationChip(host))).toBe("Account A → Account C after this turn");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account C with the next message");
   await openPicker(host);
-  /* The newer switch is the one a cancel names. */
-  expect(picker(host)!.querySelector("[data-account-cancel]")?.getAttribute("data-account-cancel")).toBe("withdraw");
+  /* The newer switch is the one standing: a cancel is a pick of the running account. */
+  expect(picker(host)!.querySelector("[data-account-cancel]")?.getAttribute("data-account-cancel")).toBe("pick");
   await closePicker();
 
   update({ files: [build, { ...verify, migration: { intentId: "intent-1", trigger: "manual", phase: "preparing", targetAccountId: "account-c", targetLabel: "account-c", failure: null, revision: 4 } }] });
@@ -388,10 +393,10 @@ test("a queued switch on an idle conversation says queued, never that it waits f
   const { host } = mount(searchPipeline(), [build, { ...verify, activity: "idle", proc: null, pid: null, authoritativeTurn: { state: "idle", source: "lifecycle", terminalAt: null } } as unknown as FileEntry]);
   await tick();
   await openVerify(host);
-  expect(chipText(conversationChip(host))).toBe("Account A → Account G queued");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account G with the next message");
   await openPicker(host);
-  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · queued"]);
-  expect(notes(host)).toContain("No turn is running: the switch starts now, and the next message goes to the chosen account.");
+  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · moves with the next message"]);
+  expect(notes(host)).toContain("No turn is running. The choice shows at once, and the conversation moves to the chosen account with its next message.");
   expect(notes(host).some((note) => /current turn/.test(note))).toBe(false);
   await closePicker();
 
@@ -404,4 +409,72 @@ test("a queued switch on an idle conversation says queued, never that it waits f
   await openPicker(host);
   expect(rows(host).find((entry) => entry.id === "account-g")?.disabled).toBe(false);
   expect(hostRequests).toEqual([]);
+});
+
+/* #1846 critique P1: the board's chip and picker read and write the one picked-account store the runtime pill,
+   the card badge and the phone title use, so a pick made on any of them shows on all of them in one frame. */
+
+test("a pick made in the runtime pill shows on the board's chip and picker in the same frame, before any projection", async () => {
+  installRuntime(null);
+  const { host } = mount(searchPipeline());
+  await tick();
+  await openVerify(host);
+  expect(chipText(conversationChip(host))).toBe("Account A");
+  /* What the pill's pick writes, and nothing else: no answer, no snapshot. */
+  flushSync(() => setPickedAccount(conversationIdentity(verify), "account-g"));
+  expect(chipText(conversationChip(host))).toBe("Account A → Account G with the next message");
+  await openPicker(host);
+  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · moves with the next message"]);
+  expect(picker(host)!.querySelector("[data-account-pending]")?.getAttribute("data-account-source")).toBe("pick");
+  expect(rows(host).find((entry) => entry.id === "account-g")?.checked).toBe(true);
+  expect(rows(host).find((entry) => entry.id === "account-c")?.disabled).toBe(false);
+  expect(notes(host)).not.toContain("Too late to cancel: the switch has started.");
+  await closePicker();
+  expect(hostRequests).toEqual([]);
+
+  /* Taken back in the pill while the projection still reports the pick: the chip follows in the same frame. */
+  installRuntime({ operationId: "op-pill", accountId: "account-g" });
+  flushSync(() => setPickedAccount(conversationIdentity(verify), "default"));
+  expect(chipText(conversationChip(host))).toBe("Account A");
+});
+
+test("a pick made in the board picker is written to the shared store at once, and the running account takes it back with one reconfigure", async () => {
+  installRuntime(null);
+  const { host } = mount(searchPipeline());
+  await tick();
+  await openVerify(host);
+  await openPicker(host);
+  click(row(host, "account-c"));
+  /* Same frame: every other account surface reads this store. */
+  expect(readPickedAccount(conversationIdentity(verify))).toBe("account-c");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account C with the next message");
+  await tick(40);
+  expect(hostRequests.map((body) => body.accountId)).toEqual(["account-c"]);
+
+  /* The projection arrives; then the cancel is a pick of the account it runs on. */
+  installRuntime({ operationId: "op-1", accountId: "account-c" });
+  await tick();
+  await openPicker(host);
+  click(picker(host)!.querySelector("[data-account-cancel]"));
+  expect(readPickedAccount(conversationIdentity(verify))).toBe("default");
+  expect(chipText(conversationChip(host))).toBe("Account A");
+  await tick(40);
+  expect(hostRequests.map((body) => body.accountId)).toEqual(["account-c", "default"]);
+  expect(migrationRequests).toEqual([]);
+});
+
+test("a board pick the route refuses goes back on every surface and is said once", async () => {
+  installRuntime(null);
+  hostAnswer = { status: 409, error: "the account is signed out" };
+  const { host } = mount(searchPipeline());
+  await tick();
+  await openVerify(host);
+  await openPicker(host);
+  click(row(host, "account-c"));
+  expect(readPickedAccount(conversationIdentity(verify))).toBe("account-c");
+  await tick(40);
+  expect(readPickedAccount(conversationIdentity(verify))).toBeNull();
+  expect(chipText(conversationChip(host))).toBe("Account A");
+  expect(hostRequests).toHaveLength(1);
+  expect(receiptTexts(host).filter((text) => text?.includes("the account is signed out"))).toHaveLength(1);
 });

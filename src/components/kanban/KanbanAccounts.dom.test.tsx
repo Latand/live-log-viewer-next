@@ -384,20 +384,20 @@ test("a conversation switches with the header's reconfigure; an account outside 
     ["account-e", expect.stringMatching(/^limit · resets \d/), false, false],
   ]);
   expect(notes(host)).toEqual([
-    "The running turn is never interrupted. The switch waits for it to end, then this conversation continues on the chosen account.",
+    "The running turn is never interrupted. The choice shows at once, and the conversation moves to the chosen account with its next message.",
     "Accounts outside this project's accounts can be chosen for a conversation; the choice is recorded as yours.",
   ]);
   click(row(host, "account-g"));
   await tick(20);
   expect(hostRequests).toEqual([{ action: "reconfigure", path: verify.path, conversationId: verify.conversationId, accountId: "account-g", model: "opus", effort: "high" }]);
   expect(receiptTexts(host)).toEqual([
-    "Switch to Account G requested for Verify. It waits for the current turn to end.",
+    "Switch to Account G recorded for Verify. It moves with the next message.",
     "Account G is outside this project's accounts; the switch is recorded as your choice",
   ]);
-  expect(chipText(conversationChip(host))).toBe("Account A → Account G after this turn");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account G with the next message");
 
   await openPicker(host, conversationChip(host));
-  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · waits for the current turn to end"]);
+  expect(kv(host).at(-1)).toEqual(["Pending", "Account G · moves with the next message"]);
   expect(picker(host)!.querySelector("[data-account-pending]")?.getAttribute("data-account-source")).toBe("page");
   expect(notes(host)[0]).toBe("Known to this page only. A reload or another page won't show this switch until the server records it.");
   /* Still queued: it can be cancelled by its operation, or changed. */
@@ -534,7 +534,7 @@ test("Change withdraws the queued switch first and asks for the new account only
   await openPicker(host, conversationChip(host));
   click(row(host, "account-c"));
   await tick(20);
-  expect(chipText(conversationChip(host))).toBe("Account A → Account C after this turn");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account C with the next message");
 
   await openPicker(host, conversationChip(host));
   click(row(host, "account-g"));
@@ -542,13 +542,13 @@ test("Change withdraws the queued switch first and asks for the new account only
   expect(writes).toEqual(["reconfigure:account-c", "migration:withdraw", "reconfigure:account-g"]);
   expect(migrationRequests).toEqual([{ conversationId: verify.conversationId!, body: { action: "withdraw", operationId: "op-1" } }]);
   expect(receiptTexts(host).slice(-2)).toEqual([
-    "Switch to Account G requested for Verify. It waits for the current turn to end.",
+    "Switch to Account G recorded for Verify. It moves with the next message.",
     "Account G is outside this project's accounts; the switch is recorded as your choice",
   ]);
   expect(receiptTexts(host)).toContain("Cancelled the switch to Account C for Verify");
   /* The cancelled switch's own request ended with the cancel, not as a failure. */
   expect(receiptTexts(host).some((text) => text.includes("failed"))).toBe(false);
-  expect(chipText(conversationChip(host))).toBe("Account A → Account G after this turn");
+  expect(chipText(conversationChip(host))).toBe("Account A → Account G with the next message");
 });
 
 test("a refused cancel requests no new account and says why", async () => {

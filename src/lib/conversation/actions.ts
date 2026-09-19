@@ -28,6 +28,7 @@ type ConversationActionBody =
   | Exclude<DeliveryOutcome, { ok: false }>
   | Omit<Extract<DeliveryOutcome, { ok: false }>, "status">
   | { ok: true; structured: true; target: string; outcome: "delivered" | "resumed"; spawned?: boolean }
+  | { ok: true; structured: true; target: string; outcome: "withdrawn"; withdrawn: string | null }
   | { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } }
   | { ok: false; outcome: "failed"; code: typeof BRANCH_SHARED_HOST_CODE; error: string }
   | { error: string };

@@ -403,7 +403,7 @@ test("the model drill-down keeps model rows available for turn-boundary reconfig
   );
   await click(host.querySelector("[data-runtime-pill]")!);
   const submenu = [...host.ownerDocument.querySelectorAll('[data-runtime-row="submenu"]')];
-  expect(submenu.map((row) => row.getAttribute("data-runtime-value"))).toEqual(["model", "speed"]);
+  expect(submenu.map((row) => row.getAttribute("data-runtime-value"))).toEqual(["model", "speed", "account"]);
   await click(submenu[0]!);
   // One anchored surface — the root panel is gone, the model panel is in place.
   const modelRows = [...host.ownerDocument.querySelectorAll('[data-runtime-row="model"]')];
@@ -442,7 +442,7 @@ test("speed rows exist only for codex and remain available on the structured sur
   await click(claude.host.querySelector("[data-runtime-pill]")!);
   const values = [...claude.host.ownerDocument.querySelectorAll('[data-runtime-row="submenu"]')]
     .map((row) => row.getAttribute("data-runtime-value"));
-  expect(values).toEqual(["model"]);
+  expect(values).toEqual(["model", "account"]);
   await act(async () => claude.root.unmount());
 });
 

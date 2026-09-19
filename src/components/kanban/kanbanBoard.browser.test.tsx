@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium, type Browser, type LaunchOptions, type Page } from "playwright-core";
 
+import { translate } from "@/lib/i18n";
 import { en } from "@/lib/i18n/en";
 
 import { openFixture, serveEvidenceFixture } from "./issue1695BrowserHarness";
@@ -2589,7 +2590,7 @@ describe("#1695 K6a account chips and pickers", () => {
    *   - a running stage conversation's chip and picker: its current account and
    *     stage setting, an account outside the project's accounts offered and
    *     recorded, the switch sent as the conversation header's `reconfigure`,
-   *     then "after this turn" with the target known to this page only (the
+   *     then "with the next message" with the target known to this page only (the
    *     fixture runs without a runtime plane, so no session reports it), every
    *     nothing resent while it waits, and "now runs on" only once the
    *     conversation runs on the target;
@@ -2806,8 +2807,8 @@ describe("#1695 K6a account chips and pickers", () => {
           await page.waitForTimeout(1_500);
           const committed = await page.evaluate((selector) => document.querySelector(selector)?.textContent?.trim() ?? "", VERIFY_CHIP);
           flows.conversationSwitch = { pending, requests, waiting, migrationRequests, changedRequests, changedChip, committed, receipts: await receipts(page) };
-          if (!pending || !pending.chip.pending || pending.chip.when !== "after this turn") failures.push(`pending switch: chip ${JSON.stringify(pending?.chip)}`);
-          if (JSON.stringify(pending?.now.at(-1)) !== JSON.stringify(["Pending", "Account G · waits for the current turn to end"])) failures.push(`pending switch: summary ${JSON.stringify(pending?.now)}`);
+          if (!pending || !pending.chip.pending || pending.chip.when !== "with the next message") failures.push(`pending switch: chip ${JSON.stringify(pending?.chip)}`);
+          if (JSON.stringify(pending?.now.at(-1)) !== JSON.stringify(["Pending", "Account G · moves with the next message"])) failures.push(`pending switch: summary ${JSON.stringify(pending?.now)}`);
           if (!pending?.cancel || pending.label !== "Change the pending account" || pending.rows.filter((row) => !row.disabled).length < 3) failures.push(`pending switch: Cancel and Change ${JSON.stringify({ cancel: pending?.cancel, label: pending?.label, rows: pending?.rows })}`);
           if (!pending?.notes.some((note) => note.startsWith("Known to this page only."))) failures.push(`pending switch: notes ${JSON.stringify(pending?.notes)}`);
           if (requests.length !== 1 || requests[0]?.action !== "reconfigure" || requests[0]?.accountId !== "account-g" || requests[0]?.conversationId !== "conversation_search-ver-2") failures.push(`pending switch: requests ${JSON.stringify(requests)}`);
@@ -2897,6 +2898,182 @@ describe("#1695 K6a account chips and pickers", () => {
     fs.writeFileSync(path.join(EVIDENCE, "k6.json"), `${JSON.stringify({ prototypeCompared: Boolean(PROTOTYPE), frames, comparison, flows, failures }, null, 2)}\n`);
     if (failures.length) throw new Error(failures.join("\n"));
   }, 900_000);
+});
+
+describe("#1846 one account pick, every surface in the same frame", () => {
+  /*
+   * Rendered evidence for the account pick's shared store (#1846, critique P1): the running verify
+   * conversation on a structured host (`&runtime=structured` answers one runtime session), so the reader's
+   * composer draws its runtime pill beside the board's account chip. A pick made in either one must show in
+   * the other in the frame of the click, before any answer or projection: the fixture's runtime snapshot
+   * never projects the pick, so whatever shows came from the page's own store.
+   *
+   *   LLV_KANBAN_BROWSER_TEST=1 bun test src/components/kanban/kanbanBoard.browser.test.tsx -t "#1846"
+   *
+   * Measurements go to `evidence/issue-1846/shared-pick.json`; frames to `.artifacts/issue-1846/`.
+   */
+  const OUT = path.resolve(".artifacts/issue-1846");
+  const EVIDENCE = path.resolve("evidence/issue-1846");
+  const READER = '[data-reader-path="/repo/search-ver-2.jsonl"]';
+  const CHIP = '[data-kanban-board] [data-account-trigger="conversation_search-ver-2"]';
+
+  /** Clicks inside the page and reads every surface one animation frame later. */
+  const clickAndRead = (page: Page, selector: string) => page.evaluate(async ([target, chip]) => {
+    const text = (element: Element | null | undefined) => element?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    const element = document.querySelector<HTMLElement>(target);
+    if (!element) return { error: `no ${target}` };
+    const started = performance.now();
+    element.click();
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    return {
+      ms: Math.round((performance.now() - started) * 10) / 10,
+      chip: [...(document.querySelector(chip)?.querySelectorAll(".cur, .arrow, .to, .when") ?? [])].map(text).join(" "),
+      pillHead: text(document.querySelector("[data-runtime-popover-account]")),
+      pickerPending: text(document.querySelector(".popover.acct-pop [data-account-pending] .v")),
+    };
+  }, [selector, CHIP] as const);
+
+  /* The desktop board in English at the board's own width, and at 1280 px in Ukrainian, whose «з наступним
+     повідомленням» is the longer tail the chip has to hold (#1846 critique P3). */
+  const PASSES = [
+    { lang: "en", viewport: VIEWPORT },
+    { lang: "uk", viewport: VIEWPORT },
+    { lang: "en", viewport: { width: 1_280, height: 900 } },
+    { lang: "uk", viewport: { width: 1_280, height: 900 } },
+  ] as const;
+
+  /** A chip-sized cell: its text, its width, and whether it draws less than its text. */
+  const cellReading = (page: Page, selector: string) => page.evaluate((sel) => {
+    const element = document.querySelector<HTMLElement>(sel);
+    if (!element) return null;
+    const box = element.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const cut = [element, ...element.querySelectorAll<HTMLElement>("*")].some((node) => node.scrollWidth > node.clientWidth + 1);
+    return {
+      text: element.textContent?.replace(/\s+/g, " ").trim() ?? "",
+      width: Math.round(box.width * 10) / 10,
+      inView: box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth,
+      cut,
+    };
+  }, selector);
+
+  browserTest("#1846: a pick in the runtime pill shows on the board chip, and a pick on the board shows in the pill, in one frame", async () => {
+    fs.mkdirSync(OUT, { recursive: true });
+    fs.mkdirSync(EVIDENCE, { recursive: true });
+    const server = await serveEvidenceFixture(OUT);
+    const browser: Browser = await chromium.launch(LAUNCH);
+    const failures: string[] = [];
+    const passes: Record<string, unknown>[] = [];
+    try {
+      for (const { lang, viewport } of PASSES) {
+        const tr = (key: Parameters<typeof translate>[1], vars?: Record<string, string>) => translate(lang, key, vars);
+        /* Every surface names an account by the label its rows carry (#1846 critique P2). */
+        const runsOn = tr("mobile2.composer.accountRunsOn", { account: "Account A" });
+        const runsOnNext = tr("mobile2.composer.accountRunsOnNext", { account: "Account A", next: "Account C" });
+        const chipMoving = `Account A → Account C ${tr("kanban.account.whenNextMessage")}`;
+        const key = `${lang}-${viewport.width}`;
+        const fail = (label: string) => failures.push(`${key}: ${label}`);
+        const record: Record<string, unknown> = { lang, viewport };
+        passes.push(record);
+        const opened = await openFixture(browser, `${server.base}?scenario=accounts&runtime=structured`, viewport, "light", lang);
+        const { page } = opened;
+        try {
+          await page.waitForSelector("[data-kanban-board] .card[data-id]", { state: "attached", timeout: 20_000 });
+          await page.waitForTimeout(700);
+          await page.locator(`${card("t-search")} .stage-section`).evaluate((element) => element.scrollIntoView({ block: "center" }));
+          await page.click(`${card("t-search")} .psummary [data-stage="verify"]`);
+          await page.waitForSelector(CHIP, { timeout: 10_000 });
+          await page.waitForSelector(`${READER} [data-runtime-pill]`, { state: "attached", timeout: 10_000 });
+          await page.waitForTimeout(500);
+          record.before = await page.evaluate((chip) => document.querySelector(chip)?.textContent?.replace(/\s+/g, " ").trim() ?? "", CHIP);
+
+          /* 1. The pill's Account panel picks Account C. */
+          await page.locator(`${READER} [data-runtime-pill]`).evaluate((element) => { element.scrollIntoView({ block: "center" }); (element as HTMLElement).click(); });
+          await page.waitForSelector('[data-runtime-row="submenu"][data-runtime-value="account"]', { timeout: 5_000 });
+          await page.click('[data-runtime-row="submenu"][data-runtime-value="account"]');
+          await page.waitForSelector('[data-runtime-row="account"][data-runtime-value="account-account-c"]', { timeout: 5_000 });
+          const pillPick = await clickAndRead(page, '[data-runtime-row="account"][data-runtime-value="account-account-c"]');
+          record.pillPick = pillPick;
+          await page.waitForTimeout(200);
+          /* The popover closed with the pick: the pill it was made on carries it (critique P3), and the board chip
+             and the reader's account chip hold the longer tail whole. */
+          record.pillMark = await cellReading(page, `${READER} [data-runtime-pill-next-account]`);
+          record.boardChip = await cellReading(page, CHIP);
+          /* The reader's own header chip, in the board column that holds the reader: the narrow pane. The
+             conversation pane's «@ A → B» badge is not mounted here — a kanban reader replaces the pane's
+             header with this one — so the reading below also records that it is absent. */
+          record.readerChip = await cellReading(page, `${READER} [data-account-trigger]`);
+          record.readerWidth = await page.evaluate((reader) => Math.round((document.querySelector(reader)?.getBoundingClientRect().width ?? 0) * 10) / 10, READER);
+          record.paneBadges = await page.evaluate(() => document.querySelectorAll("[data-conversation-account-chip]").length);
+          await page.screenshot({ path: path.join(OUT, `${key}-pill-pick-chip.png`) });
+          if (!("chip" in pillPick) || pillPick.chip !== chipMoving) fail(`pill pick: chip ${JSON.stringify(pillPick)}`);
+          const pillMark = record.pillMark as Awaited<ReturnType<typeof cellReading>>;
+          if (pillMark?.text !== "→ Account C" || pillMark.cut) fail(`the pill's face carries the pick: ${JSON.stringify(pillMark)}`);
+          const boardChip = record.boardChip as Awaited<ReturnType<typeof cellReading>>;
+          if (boardChip?.cut !== false) fail(`the board chip holds its tail whole: ${JSON.stringify(boardChip)}`);
+          const readerChip = record.readerChip as Awaited<ReturnType<typeof cellReading>>;
+          if (!readerChip || readerChip.cut || !readerChip.text.includes("Account C")) fail(`the reader's header chip names the pick whole: ${JSON.stringify(readerChip)}`);
+
+          /* 2. The board picker, opened now, says the same thing. */
+          await page.click(CHIP);
+          await page.waitForSelector(".popover.acct-pop .acct-row", { timeout: 5_000 });
+          const picker = await page.evaluate(() => ({
+            pending: document.querySelector(".popover.acct-pop [data-account-pending] .v")?.textContent?.trim() ?? null,
+            source: document.querySelector(".popover.acct-pop [data-account-pending]")?.getAttribute("data-account-source") ?? null,
+            checked: [...document.querySelectorAll('.popover.acct-pop .acct-row[aria-checked="true"]')].map((row) => (row as HTMLElement).dataset.account),
+          }));
+          record.pickerAfterPillPick = picker;
+          await page.screenshot({ path: path.join(OUT, `${key}-pill-pick-picker.png`) });
+          if (picker.pending !== tr("kanban.account.pendingNextMessage", { target: "Account C" }) || picker.source !== "pick" || JSON.stringify(picker.checked) !== JSON.stringify(["account-c"])) fail(`board picker after the pill's pick: ${JSON.stringify(picker)}`);
+
+          /* 3. The board picker takes it back: the pill's line and its face follow in the same frame. */
+          const boardBack = await clickAndRead(page, '.popover.acct-pop [data-account-cancel]');
+          record.boardTakeBack = boardBack;
+          record.pillMarkAfterTakeBack = await cellReading(page, `${READER} [data-runtime-pill-next-account]`);
+          await page.locator(`${READER} [data-runtime-pill]`).evaluate((element) => (element as HTMLElement).click());
+          await page.waitForSelector("[data-runtime-popover-account]", { timeout: 5_000 });
+          const pillAfterBack = await page.evaluate(() => document.querySelector("[data-runtime-popover-account]")?.textContent?.trim() ?? "");
+          record.pillAfterBoardTakeBack = pillAfterBack;
+          if (!("chip" in boardBack) || boardBack.chip !== "Account A" || pillAfterBack !== runsOn || record.pillMarkAfterTakeBack !== null) fail(`board take-back: ${JSON.stringify({ boardBack, pillAfterBack, mark: record.pillMarkAfterTakeBack })}`);
+          await page.keyboard.press("Escape");
+          await page.waitForTimeout(200);
+
+          /* 4. A pick in the board picker, then the pill's popover. */
+          await page.locator(`${READER} [data-runtime-pill]`).evaluate((element) => (element as HTMLElement).click());
+          await page.waitForSelector("[data-runtime-popover-account]", { timeout: 5_000 });
+          const pillHeadBefore = await page.evaluate(() => document.querySelector("[data-runtime-popover-account]")?.textContent?.trim() ?? "");
+          await page.keyboard.press("Escape");
+          await page.click(CHIP);
+          await page.waitForSelector(".popover.acct-pop .acct-row", { timeout: 5_000 });
+          const boardPick = await clickAndRead(page, '.popover.acct-pop .acct-row[data-account="account-c"]');
+          record.boardPick = boardPick;
+          await page.locator(`${READER} [data-runtime-pill]`).evaluate((element) => (element as HTMLElement).click());
+          await page.waitForSelector("[data-runtime-popover-account]", { timeout: 5_000 });
+          const pillHeadAfter = await page.evaluate(() => document.querySelector("[data-runtime-popover-account]")?.textContent?.trim() ?? "");
+          record.pillHead = { before: pillHeadBefore, after: pillHeadAfter };
+          await page.screenshot({ path: path.join(OUT, `${key}-board-pick-pill.png`) });
+          if (pillHeadBefore !== runsOn || pillHeadAfter !== runsOnNext) fail(`pill after the board's pick: ${JSON.stringify(record.pillHead)}`);
+          if (!("chip" in boardPick) || boardPick.chip !== chipMoving) fail(`board pick: chip ${JSON.stringify(boardPick)}`);
+
+          record.requests = await page.evaluate(() => {
+            const evidence = (window as unknown as { evidence: { pillRequests: Array<Record<string, unknown>>; accountRequests: Array<Record<string, unknown>>; migrationRequests: unknown[] } }).evidence;
+            return { pill: evidence.pillRequests.map((body) => body.accountId), board: evidence.accountRequests.map((body) => body.accountId), migrations: evidence.migrationRequests.length };
+          });
+          const requests = record.requests as { pill: unknown[]; board: unknown[]; migrations: number };
+          if (JSON.stringify(requests.pill) !== JSON.stringify(["account-c"]) || JSON.stringify(requests.board) !== JSON.stringify(["default", "account-c"]) || requests.migrations !== 0) fail(`requests: ${JSON.stringify(requests)}`);
+          if (opened.pageErrors.length) fail(`page errors ${opened.pageErrors.join(" | ")}`);
+        } finally {
+          await opened.context.close();
+        }
+      }
+    } finally {
+      await browser.close();
+      server.stop();
+    }
+    fs.writeFileSync(path.join(EVIDENCE, "shared-pick.json"), `${JSON.stringify({ passes, failures }, null, 2)}\n`);
+    if (failures.length) throw new Error(failures.join("\n"));
+  }, 300_000);
 });
 
 describe("#1712 the window of a conversation no card holds", () => {

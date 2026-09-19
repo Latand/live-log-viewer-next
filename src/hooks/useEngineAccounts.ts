@@ -1,6 +1,6 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 
 import {
   type AutoBalance,
@@ -1042,4 +1042,18 @@ export function useEngineAccounts(engine: Engine): EngineAccountsState {
     refreshLimits: store.refreshLimits,
     useResetCredit: store.useResetCredit,
   };
+}
+
+/** The name an account goes by on every surface that names it: its label, or its
+    id for an account the list does not enumerate, such as the legacy home. A
+    surface that names accounts by id beside one that names them by label made
+    the operator map one to the other to confirm where the next message goes
+    (#1846 critique). */
+export function useAccountName(engine: Engine): (id: string) => string {
+  const store = stores[engine];
+  const { accounts } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  return useMemo(() => {
+    const labels = new Map(accounts.map((account) => [account.id, account.label]));
+    return (id: string) => labels.get(id) || id;
+  }, [accounts]);
 }

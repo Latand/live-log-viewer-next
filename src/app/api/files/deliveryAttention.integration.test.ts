@@ -112,3 +112,33 @@ test("a retried message that parks again keeps its attention entry and clock (#1
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("a switch the registry has claimed rides the file as applying until it settles (#1846)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-switch-applying-"));
+  const transcriptPath = path.join(directory, "switching.jsonl");
+  fs.writeFileSync(transcriptPath, "\n");
+  const previousState = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(directory, "state");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), () => false);
+  setAgentRegistryForTests(registry);
+  const read = async () => {
+    const response = await buildFilesResponse(new Request("http://127.0.0.1/api/files"), {
+      listFilesWithProjectCatalog: async () => ({ files: [scannedFile(transcriptPath)], projectCatalog: [], complete: true }),
+    });
+    return (await response.json() as { files: FileEntry[] }).files[0]!;
+  };
+  try {
+    const conversation = registry.ensureConversation("codex", transcriptPath, "default");
+    expect((await read()).switchApplying).toBeUndefined();
+    const profile = { model: "gpt-5.6-sol", effort: "high", fast: false };
+    registry.claimConversationReconfigure(conversation.id, { operationId: "pick-b", revision: 1, accountId: "codex-b", profile });
+    expect((await read()).switchApplying).toEqual({ operationId: "pick-b" });
+    registry.settleConversationReconfigure(conversation.id, "pick-b", 1, "failed", "superseded");
+    expect((await read()).switchApplying).toBeUndefined();
+  } finally {
+    setAgentRegistryForTests(null);
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

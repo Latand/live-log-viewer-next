@@ -11,8 +11,13 @@ import { bindAccountToProject } from "@/lib/accounts/projectBindings";
 import { procBackend } from "@/lib/proc";
 import { projectForCwd } from "@/lib/scanner/describe";
 
+import { RuntimeJournal } from "@/runtime-host/journal";
+
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
+import type { RuntimeOperationCommand } from "./contracts";
 import { dispatchStructuredControl } from "./structuredControls";
+import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
+import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-controls-"));
@@ -1056,3 +1061,178 @@ for (const action of ["interrupt", "kill"]) {
     expect(commands).toEqual([]);
   });
 }
+
+/* ── #1846: a pick is the conversation's intended account ─────────────────── */
+
+/** A client over a real runtime journal in a private SQLite file: what the dispatch writes is what the queue reads. */
+function journalClient(name: string): { journal: RuntimeJournal; client: RuntimeHostClient; commands: RuntimeOperationCommand[] } {
+  const journal = new RuntimeJournal(path.join(sandbox, `${name}.sqlite`), { structuredHosts: true });
+  const commands: RuntimeOperationCommand[] = [];
+  const client = {
+    command: async (command: RuntimeOperationCommand) => {
+      commands.push(command);
+      return journal.executeOperation(command);
+    },
+    effectBatch: async (kinds?: readonly string[], afterEventSeq = 0) => journal.effectBatch(100, kinds, afterEventSeq),
+    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+  } as unknown as RuntimeHostClient;
+  return { journal, client, commands };
+}
+
+async function pickAccount(
+  fixture: { registry: AgentRegistry; path: string },
+  client: RuntimeHostClient,
+  operationId: string,
+  reconfiguration: { model: string; effort: string; fast: boolean; accountId?: string },
+) {
+  return dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "reconfigure", reconfiguration }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => operationId,
+    accountExists: () => true,
+    enabled: () => true,
+    kick: () => {},
+  });
+}
+
+function profiledConversation() {
+  const fixture = structuredConversation();
+  const id = fixture.conversationId as `conversation_${string}`;
+  fixture.registry.updateConversationLaunchProfile(id, { model: "gpt-5.6-sol", effort: "high", fast: true });
+  return { ...fixture, id };
+}
+
+test("picking B and then the account it runs on withdraws B, and no migration is ever attempted", async () => {
+  const fixture = profiledConversation();
+  const { journal, client, commands } = journalClient("b-then-a");
+  const profile = { model: "gpt-5.6-sol", effort: "high", fast: true };
+
+  expect(await pickAccount(fixture, client, "pick-b", { ...profile, accountId: "codex-b" }))
+    .toMatchObject({ status: 202, body: { operationId: "pick-b" } });
+  const back = await pickAccount(fixture, client, "pick-a", { ...profile, accountId: "codex-subscription" });
+  expect(back).toEqual({
+    status: 200,
+    body: { ok: true, structured: true, target: fixture.conversationId, outcome: "withdrawn", withdrawn: "pick-b" },
+  });
+  /* Taking a pick back sends nothing new to the host. */
+  expect(commands.map((command) => command.operationId)).toEqual(["pick-b"]);
+  expect(fixture.registry.reconfigureCancelled(fixture.id, "pick-b")).toBe(true);
+
+  /* And when the conversation is next engaged, the queue settles the withdrawn pick and moves nothing. */
+  journal.executeOperation({
+    kind: "send", operationId: "next-message", idempotencyKey: "next-message",
+    conversationId: fixture.conversationId, text: "carry on", policy: "queue",
+  });
+  const moves: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (operationId, status, details) => { journal.transitionOperation(operationId, status, details); },
+    status: async (operationId) => journal.operationResult(operationId)?.receipt ?? null,
+    reconfigureCancelled: (effect) => fixture.registry.reconfigureCancelled(effect.conversationId as `conversation_${string}`, effect.operationId),
+  }, () => null, undefined, undefined, undefined, async (effect) => {
+    moves.push(effect.operationId);
+    return "applied";
+  });
+  await queue.drain();
+  expect(moves).toEqual([]);
+  expect(journal.operationResult("pick-b")?.receipt).toMatchObject({ status: "failed", reason: "cancelled" });
+  expect(fixture.registry.conversation(fixture.id)?.migration ?? null).toBeNull();
+  journal.close();
+});
+
+test("naming the account it runs on once the pick is applying is refused, and the move is left alone", async () => {
+  const fixture = profiledConversation();
+  const { journal, client, commands } = journalClient("b-applying");
+  const profile = { model: "gpt-5.6-sol", effort: "high", fast: true };
+  await pickAccount(fixture, client, "pick-b", { ...profile, accountId: "codex-b" });
+  /* A message engaged the pick: the queue claimed it and the move is under way. */
+  journal.transitionOperation("pick-b", "applying");
+
+  const back = await pickAccount(fixture, client, "pick-a", { ...profile, accountId: "codex-subscription" });
+  expect(back).toMatchObject({ status: 409, body: { code: "switch-applying", applying: "pick-b" } });
+  expect(commands.map((command) => command.operationId)).toEqual(["pick-b"]);
+  expect(fixture.registry.reconfigureCancelled(fixture.id, "pick-b")).toBe(false);
+  journal.close();
+});
+
+test("naming the account it runs on is refused while the claim holds a move whose receipt went back to queued", async () => {
+  const fixture = profiledConversation();
+  const { journal, client, commands } = journalClient("b-claimed-queued");
+  const profile = { model: "gpt-5.6-sol", effort: "high", fast: true };
+  await pickAccount(fixture, client, "pick-b", { ...profile, accountId: "codex-b" });
+  /* A message engaged the pick and the registry claimed it; the move answered `pending` because its migration
+     has not committed, so the queue put the receipt back to `queued` while the claim still holds it applying. */
+  fixture.registry.claimConversationReconfigure(fixture.id, { operationId: "pick-b", revision: 1, accountId: "codex-b", profile });
+  journal.transitionOperation("pick-b", "applying");
+  journal.transitionOperation("pick-b", "queued", { reason: "turn-boundary" });
+
+  const back = await pickAccount(fixture, client, "pick-a", { ...profile, accountId: "codex-subscription" });
+  expect(back).toMatchObject({ status: 409, body: { code: "switch-applying", applying: "pick-b" } });
+  expect(commands.map((command) => command.operationId)).toEqual(["pick-b"]);
+  expect(fixture.registry.conversation(fixture.id)?.reconfigure).toMatchObject({ operationId: "pick-b", status: "applying" });
+  expect(fixture.registry.reconfigureCancelled(fixture.id, "pick-b")).toBe(false);
+  journal.close();
+});
+
+test("a claim that lands between the status read and the withdrawal is refused, never superseded", async () => {
+  const fixture = profiledConversation();
+  const { journal, client, commands } = journalClient("b-claim-race");
+  const profile = { model: "gpt-5.6-sol", effort: "high", fast: true };
+  await pickAccount(fixture, client, "pick-b", { ...profile, accountId: "codex-b" });
+  const readStatus = client.operationStatus.bind(client);
+  /* The queue claims the pick right after the route has read it as waiting. */
+  client.operationStatus = async (operationId: string) => {
+    const status = await readStatus(operationId);
+    fixture.registry.claimConversationReconfigure(fixture.id, { operationId: "pick-b", revision: 1, accountId: "codex-b", profile });
+    return status;
+  };
+
+  const back = await pickAccount(fixture, client, "pick-a", { ...profile, accountId: "codex-subscription" });
+  expect(back).toMatchObject({ status: 409, body: { code: "switch-applying", applying: "pick-b" } });
+  expect(commands.map((command) => command.operationId)).toEqual(["pick-b"]);
+  expect(fixture.registry.conversation(fixture.id)?.reconfigure).toMatchObject({ operationId: "pick-b", status: "applying" });
+  journal.close();
+});
+
+test("a settings change made while a pick waits keeps the picked account", async () => {
+  const fixture = profiledConversation();
+  const { journal, client, commands } = journalClient("carry-forward");
+  await pickAccount(fixture, client, "pick-b", { model: "gpt-5.6-sol", effort: "high", fast: true, accountId: "codex-b" });
+  await pickAccount(fixture, client, "effort-change", { model: "gpt-5.6-sol", effort: "xhigh", fast: true });
+  expect(commands.at(-1)).toMatchObject({ operationId: "effort-change", effort: "xhigh", accountId: "codex-b" });
+  journal.close();
+});
+
+test("naming the account it runs on with nothing else changed sends nothing, and releases a failed switch's hold", async () => {
+  const fixture = profiledConversation();
+  const { journal, client, commands } = journalClient("keep-current");
+  fixture.registry.holdForFailedSwitch(fixture.id, { operationId: "pick-b", accountId: "codex-b", reason: "codex account requires authentication" });
+  const result = await pickAccount(fixture, client, "pick-a", { model: "gpt-5.6-sol", effort: "high", fast: true, accountId: "codex-subscription" });
+  expect(result).toMatchObject({ status: 200, body: { outcome: "withdrawn", withdrawn: null } });
+  expect(commands).toEqual([]);
+  expect(fixture.registry.switchHold(fixture.id)).toBeNull();
+  journal.close();
+});
+
+test("a new pick ends a failed switch's hold when the queue claims it", () => {
+  const fixture = profiledConversation();
+  fixture.registry.holdForFailedSwitch(fixture.id, { operationId: "pick-b", accountId: "codex-b", reason: "the migration was refused" });
+  expect(fixture.registry.switchHold(fixture.id)).toMatchObject({ accountId: "codex-b", reason: "the migration was refused" });
+  fixture.registry.claimConversationReconfigure(fixture.id, {
+    operationId: "pick-c", revision: 7, profile: { model: "gpt-5.6-sol", effort: "high", fast: true }, accountId: "codex-c",
+  });
+  expect(fixture.registry.switchHold(fixture.id)).toBeNull();
+});
+
+test("«send on the current account» releases the hold and wakes the queue, once", async () => {
+  const fixture = profiledConversation();
+  fixture.registry.holdForFailedSwitch(fixture.id, { operationId: "pick-b", accountId: "codex-b", reason: "the migration was refused" });
+  let kicks = 0;
+  const dependencies = { registry: () => fixture.registry, kick: () => { kicks += 1; } };
+  expect(await applyConversationMigration({ conversationId: fixture.conversationId, action: "keep-current" }, dependencies))
+    .toMatchObject({ status: 200, body: { keepCurrent: "released" } });
+  expect(fixture.registry.switchHold(fixture.id)).toBeNull();
+  expect(await applyConversationMigration({ conversationId: fixture.conversationId, action: "keep-current" }, dependencies))
+    .toMatchObject({ status: 200, body: { keepCurrent: "nothing-held" } });
+  expect(kicks).toBe(2);
+});

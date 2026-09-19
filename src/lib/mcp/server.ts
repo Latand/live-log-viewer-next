@@ -2860,7 +2860,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   get_task: "Read one durable board task, including the whole agent-facing `details`.",
   deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments, newest first. `compact: true` answers each deployment as {deploymentId, phase, sha, terminal, startedAt, finishedAt, error}; without it, the full record.",
   resources: "Read system and Viewer-owned agent resource usage.",
-  conversation_migration: "Reseat, retry, roll back or cancel a conversation account migration, or withdraw an account switch the queue has not claimed yet.",
+  conversation_migration: "Reseat, retry, roll back or cancel a conversation account migration, withdraw an account switch the queue has not claimed yet, or send messages a failed switch held on the current account.",
   agent_activity: "Read agent liveness: last transcript record, turn state, host state, provider-throttle retry time, and confirmed stalls. `compact: true` answers each conversation as {conversationId, title, turnState, lifecycle, silentForMs, stalledForMs, pipeline} and drops the transcript paths, host detail and the selection and timing reports.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
   request_attention: [
@@ -3356,7 +3356,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   conversation_migration: z.object({
     clientRequestId: clientRequestIdSchema,
     conversationId: z.string().min(1),
-    action: z.enum(["reseat", "retry", "rollback", "cancel", "withdraw"]).describe("cancel: a claimed switch still waiting for its turn, by expectedRevision; the migration is rolled back and the reconfigure that owned it never applies, and the same cancel again answers cancel: replayed. withdraw: a queued switch the queue has not claimed, by operationId; a claimed one is refused with code SWITCH_CLAIMED and expectedRevision, the revision to cancel it by once its migration exists (null before)."),
+    action: z.enum(["reseat", "retry", "rollback", "cancel", "withdraw", "keep-current"]).describe("reseat: on a structured conversation, records the chosen account as the conversation's intended account (reseat: intended); it moves there when it is next engaged. keep-current: messages held by a failed account switch go out on the account the conversation runs on. cancel: a claimed switch still waiting for its turn, by expectedRevision; the migration is rolled back and the reconfigure that owned it never applies, and the same cancel again answers cancel: replayed. withdraw: a queued switch the queue has not claimed, by operationId; a claimed one is refused with code SWITCH_CLAIMED and expectedRevision, the revision to cancel it by once its migration exists (null before)."),
     expectedRevision: z.number().int().min(0).optional().describe("The migration's revision: required by retry, rollback and cancel."),
     operationId: z.string().min(1).optional().describe("withdraw: the queued reconfigure operation."),
     transcriptPath: z.string().optional(),

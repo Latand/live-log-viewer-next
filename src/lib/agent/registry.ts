@@ -454,6 +454,19 @@ export type ConversationReconfigureClaimResult =
   /* The operation was withdrawn before any claim (#1705): nothing was written. */
   | { kind: "withdrawn"; state: ConversationReconfigureState | null; conversation: RegistryConversation };
 
+/**
+ * An account switch that failed when a message engaged it (#1846). While it
+ * stands the conversation's messages stay queued where they are, and the
+ * operator either sends them on the account the conversation runs on or picks
+ * another account, whose claim ends the hold.
+ */
+export interface ConversationSwitchHold {
+  operationId: string;
+  accountId: string;
+  reason: string;
+  at: string;
+}
+
 /** A queued reconfigure withdrawn before the queue claimed it (#1705). */
 export interface ConversationReconfigureWithdrawal {
   operationId: string;
@@ -539,6 +552,8 @@ export interface RegistryConversation {
   reconfigure?: ConversationReconfigureState | null;
   /** Reconfigure operations withdrawn before their claim (#1705), newest last. */
   reconfigureWithdrawals?: ConversationReconfigureWithdrawal[];
+  /** The failed account switch holding this conversation's messages (#1846). */
+  switchHold?: ConversationSwitchHold | null;
   migration: ConversationMigration | null;
   /** Explicit Stop/Keep decision for one target at one routing revision. */
   migrationOptOut: { targetId: string; updatedAt: string } | null;
@@ -1779,6 +1794,14 @@ function normalizeReconfigureWithdrawals(value: unknown): ConversationReconfigur
     .slice(-RECONFIGURE_WITHDRAWAL_LIMIT);
 }
 
+function normalizeSwitchHold(value: unknown): ConversationSwitchHold | null {
+  const hold = value as Partial<ConversationSwitchHold> | null | undefined;
+  if (!hold || typeof hold !== "object") return null;
+  if (typeof hold.operationId !== "string" || typeof hold.accountId !== "string"
+    || typeof hold.reason !== "string" || typeof hold.at !== "string") return null;
+  return { operationId: hold.operationId, accountId: hold.accountId, reason: hold.reason, at: hold.at };
+}
+
 function normalizeConversation(value: RegistryConversation, policy?: McpGrantPolicy): RegistryConversation {
   const generations = Array.isArray(value.generations)
     ? value.generations.map((generation) => normalizeGeneration(generation, policy))
@@ -1853,6 +1876,7 @@ function normalizeConversation(value: RegistryConversation, policy?: McpGrantPol
       : null,
     reconfigure: normalizeConversationReconfigure((value as Partial<RegistryConversation>).reconfigure),
     reconfigureWithdrawals: normalizeReconfigureWithdrawals((value as Partial<RegistryConversation>).reconfigureWithdrawals),
+    switchHold: normalizeSwitchHold((value as Partial<RegistryConversation>).switchHold),
     migration,
     migrationOptOut,
     supersededBy,
@@ -6473,6 +6497,10 @@ export class AgentRegistry {
       };
       writeConversationLaunchProfile(file, conversation, generation, state.profile);
       conversation.reconfigure = state;
+      /* #1846: a new account choice is what a failed switch's hold was waiting for. A settings change, or a
+         claim that names the account it already runs on, is not one: the held messages keep waiting until the
+         operator picks another account or sends them here explicitly (`releaseSwitchHold`). */
+      if (claim.accountId !== undefined && claim.accountId !== generation.accountId) conversation.switchHold = null;
       return { kind: "claimed" as const, state: clone(state), conversation: clone(conversation) };
     });
   }
@@ -6540,6 +6568,39 @@ export class AgentRegistry {
       conversation.reconfigureWithdrawals = [...withdrawals, { operationId, at }].slice(-RECONFIGURE_WITHDRAWAL_LIMIT);
       conversation.updatedAt = at;
       return { kind: "withdrawn" as const, conversation: clone(conversation) };
+    });
+  }
+
+  /** Holds the conversation's messages after the account switch they engaged failed (#1846). */
+  holdForFailedSwitch(id: ViewerConversationId, hold: Omit<ConversationSwitchHold, "at">): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const at = now();
+      conversation.switchHold = { ...hold, at };
+      conversation.updatedAt = at;
+      return clone(conversation);
+    });
+  }
+
+  /** The failed account switch holding this conversation's messages, or null (#1846). */
+  switchHold(id: ViewerConversationId): ConversationSwitchHold | null {
+    const snapshot = this.readOnlySnapshot();
+    const hold = snapshot.conversations[resolveConversationAlias(snapshot, id)]?.switchHold;
+    return hold ? clone(hold) : null;
+  }
+
+  /** The operator sends the held messages on the account the conversation runs on (#1846). */
+  releaseSwitchHold(id: ViewerConversationId): { released: boolean; conversation: RegistryConversation } {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const released = Boolean(conversation.switchHold);
+      if (released) {
+        conversation.switchHold = null;
+        conversation.updatedAt = now();
+      }
+      return { released, conversation: clone(conversation) };
     });
   }
 

@@ -1,0 +1,349 @@
+{
+  "results": [
+    {
+      "key": "en-spare-relief",
+      "lang": "en",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "account": "spare",
+      "next": "relief",
+      "before": {
+        "line": {
+          "width": 197.2,
+          "text": "working 6:41·fable-5-1 · high"
+        },
+        "state": {
+          "text": "working 6:41",
+          "width": 62.3,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "@ spare",
+          "width": 39.8,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 151.3,
+          "cut": true
+        }
+      },
+      "sheetLine": "runs on spare · next on relief",
+      "after": {
+        "line": {
+          "width": 197.2,
+          "text": "working 6:42·fable-5-1 · high"
+        },
+        "state": {
+          "text": "working 6:42",
+          "width": 62.3,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "→ relief@ spare",
+          "width": 80.5,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 110.7,
+          "cut": true
+        }
+      },
+      "parts": {
+        "runs": {
+          "text": "@ spare",
+          "width": 39.8,
+          "need": 39.8,
+          "cut": false,
+          "shown": true
+        },
+        "to": {
+          "text": "→ relief",
+          "width": 36.6,
+          "need": 36.6,
+          "cut": false,
+          "shown": true
+        }
+      },
+      "sent": {
+        "reconfigures": [
+          "relief"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    },
+    {
+      "key": "en-review-relief-2-production-backup-7",
+      "lang": "en",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "account": "review-relief-2",
+      "next": "production-backup-7",
+      "before": {
+        "line": {
+          "width": 197.2,
+          "text": "working 6:40·fable-5-1 · high"
+        },
+        "state": {
+          "text": "working 6:40",
+          "width": 62.3,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "@ review-relief-2",
+          "width": 83.6,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 107.6,
+          "cut": true
+        }
+      },
+      "sheetLine": "runs on review-relief-2 · next on production-backup-7",
+      "after": {
+        "line": {
+          "width": 197.2,
+          "text": "working 6:42·fable-5-1 · high"
+        },
+        "state": {
+          "text": "working 6:42",
+          "width": 62.3,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "→ production-backup-7@ review-relief-2",
+          "width": 95.2,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 96,
+          "cut": true
+        }
+      },
+      "parts": {
+        "runs": {
+          "text": "@ review-relief-2",
+          "width": 83.6,
+          "need": 83.6,
+          "cut": false,
+          "shown": false
+        },
+        "to": {
+          "text": "→ production-backup-7",
+          "width": 95.2,
+          "need": 116.1,
+          "cut": true,
+          "shown": true
+        }
+      },
+      "sent": {
+        "reconfigures": [
+          "production-backup-7"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    },
+    {
+      "key": "uk-spare-relief",
+      "lang": "uk",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "account": "spare",
+      "next": "relief",
+      "before": {
+        "line": {
+          "width": 197.2,
+          "text": "працює 6:41·fable-5-1 · high"
+        },
+        "state": {
+          "text": "працює 6:41",
+          "width": 62.2,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "@ spare",
+          "width": 39.8,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 151.3,
+          "cut": true
+        }
+      },
+      "sheetLine": "працює на spare · далі на relief",
+      "after": {
+        "line": {
+          "width": 197.2,
+          "text": "працює 6:42·fable-5-1 · high"
+        },
+        "state": {
+          "text": "працює 6:42",
+          "width": 62.2,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "→ relief@ spare",
+          "width": 80.5,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 110.7,
+          "cut": true
+        }
+      },
+      "parts": {
+        "runs": {
+          "text": "@ spare",
+          "width": 39.8,
+          "need": 39.8,
+          "cut": false,
+          "shown": true
+        },
+        "to": {
+          "text": "→ relief",
+          "width": 36.6,
+          "need": 36.6,
+          "cut": false,
+          "shown": true
+        }
+      },
+      "sent": {
+        "reconfigures": [
+          "relief"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    },
+    {
+      "key": "uk-review-relief-2-production-backup-7",
+      "lang": "uk",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "account": "review-relief-2",
+      "next": "production-backup-7",
+      "before": {
+        "line": {
+          "width": 197.2,
+          "text": "працює 6:41·fable-5-1 · high"
+        },
+        "state": {
+          "text": "працює 6:41",
+          "width": 62.2,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "@ review-relief-2",
+          "width": 83.6,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 107.6,
+          "cut": true
+        }
+      },
+      "sheetLine": "працює на review-relief-2 · далі на production-backup-7",
+      "after": {
+        "line": {
+          "width": 197.2,
+          "text": "працює 6:42·fable-5-1 · high"
+        },
+        "state": {
+          "text": "працює 6:42",
+          "width": 62.2,
+          "cut": false
+        },
+        "model": {
+          "text": "fable-5-1 · high",
+          "width": 74.6,
+          "cut": false
+        },
+        "account": {
+          "text": "→ production-backup-7@ review-relief-2",
+          "width": 95.2,
+          "cut": false
+        },
+        "title": {
+          "text": "Rebuild the board status projection",
+          "width": 96,
+          "cut": true
+        }
+      },
+      "parts": {
+        "runs": {
+          "text": "@ review-relief-2",
+          "width": 83.6,
+          "need": 83.6,
+          "cut": false,
+          "shown": false
+        },
+        "to": {
+          "text": "→ production-backup-7",
+          "width": 95.2,
+          "need": 116.1,
+          "cut": true,
+          "shown": true
+        }
+      },
+      "sent": {
+        "reconfigures": [
+          "production-backup-7"
+        ],
+        "selects": 0
+      },
+      "pageErrors": []
+    }
+  ],
+  "failures": []
+}

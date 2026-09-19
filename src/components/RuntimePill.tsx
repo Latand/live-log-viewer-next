@@ -5,9 +5,12 @@ import { createPortal } from "react-dom";
 
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, X, Zap } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useEngineAccounts } from "@/hooks/useEngineAccounts";
+import { useAccountName, useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import {
+  isQuietReconfigureFailure, onAccountChoiceRequest, pickApplying, readPickedAccount, requestAccountChoice, setPickedAccount, useIntendedAccount,
+} from "@/lib/accounts/intendedAccount";
 import { effortScale } from "@/lib/agent/efforts";
 import { ENGINE_MODELS, normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
@@ -165,11 +168,27 @@ export function RuntimePill({
      through a portal, because the composer's own box is bounded and scrolls its
      content (#1629) and an in-flow popover is clipped by exactly that. */
   const [popoverAt, setPopoverAt] = useState<{ bottom: number; left: number } | null>(null);
-  const [panel, setPanel] = useState<"root" | "model" | "speed">("root");
+  const [panel, setPanel] = useState<Panel>("root");
   const [announce, setAnnounce] = useState("");
   const pillRef = useRef<HTMLButtonElement>(null);
 
   const cardId = conversationIdentity(file);
+  /* The account this conversation actually runs on, read off the live
+     transcript path exactly as the card's account badge reads it (#229). No
+     runtime surface named it before, so the operator could not tell which
+     account a message was about to go to (#1795). */
+  const runsOnAccount = accountIdFromPath(file.path);
+  /* #1846: the account the operator picked for this conversation, shown the moment it is tapped. It stands
+     until the runtime session projects the same choice, which every other page then reads too.
+     The pick is shared with the page's other account surfaces, so the header and the card badge say it too. */
+  const projectedIntent = pillSurface === "structured" ? runtimeSession?.pendingReconfigure?.accountId ?? null : null;
+  /** Where the next message goes: the intended account while one waits, else the one it runs on. */
+  const { next: nextAccount } = useIntendedAccount(cardId, runsOnAccount, projectedIntent);
+  /* Accounts are named by label on every surface, the id only for one the list does not enumerate. */
+  const nameOf = useAccountName(engine ?? "claude");
+  const moving = nextAccount !== runsOnAccount;
+  /* A pick a message already engaged is moving the conversation: too late to take back (#1846 review). */
+  const switchApplying = pillSurface === "structured" && pickApplying(runtimeSession, file);
 
   /* eslint-disable react-hooks/set-state-in-effect -- reloading the persisted
      draft/phase from localStorage when the conversation identity changes is a
@@ -282,6 +301,10 @@ export function RuntimePill({
   useEffect(() => {
     if (pillSurface !== "structured") return;
     const pending = runtimeSession?.pendingReconfigure;
+    /* #1846: an account pick is the conversation's choice, shown as «next on» until a message engages it.
+       The pill never adopts it as an apply in flight: no pending phase is written for a later page to restore
+       as a spinner, and its withdrawal or replacement is nothing to report. */
+    if (pending?.accountId) return;
     if (pending) {
       const rollback = rollbackRef.current;
       const pendingRevision = runtimeSession.revision;
@@ -318,7 +341,12 @@ export function RuntimePill({
     if (!receipt) return;
     localStorage.removeItem(phaseKey(file));
     localStorage.removeItem(phaseOperationKey(file));
-    if (receipt.status === "applied") {
+    if (receipt.status === "failed" && isQuietReconfigureFailure(receipt.reason)) {
+      /* Taken back or replaced by the operator's own later choice: settled, never a failure (#1846). */
+      clearBrowserProfileRollback(receipt.operationId);
+      operationRef.current = null;
+      setApplyState("idle");
+    } else if (receipt.status === "applied") {
       clearBrowserProfileRollback(receipt.operationId);
       operationRef.current = null;
       setApplyState("applied");
@@ -351,10 +379,13 @@ export function RuntimePill({
   }, [applyState, clearBrowserProfileRollback, engine, file, liveDraft, pillSurface]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const applying = applyState === "saving"
+  /* An account pick waits for the next message, however long that is (#1846): it is the conversation's
+     choice, shown as «next on», and nothing is being applied while it waits. */
+  const waitingForEngagement = pillSurface === "structured" && Boolean(runtimeSession?.pendingReconfigure?.accountId);
+  const applying = !waitingForEngagement && (applyState === "saving"
     || applyState === "pending"
     || applyState === "confirming"
-    || Boolean(pillSurface === "structured" && runtimeSession?.pendingReconfigure);
+    || Boolean(pillSurface === "structured" && runtimeSession?.pendingReconfigure));
 
   // ---- the effective face (single source of truth) --------------------------
   const face: RuntimeDraft = useMemo(() => {
@@ -439,11 +470,63 @@ export function RuntimePill({
     setVersion((v) => v + 1);
   }, [engine, pillSurface, file, announceCommit, applyReconfigure, runtimeSession]);
 
+  /**
+   * #1846: an account pick for THIS conversation. It is shown in the same frame and sent as the
+   * conversation's reconfigure, which records it as the intended account; the conversation moves when its
+   * next message goes. Picking the account it runs on withdraws a pick that is still waiting.
+   */
+  const pickAccount = useCallback(async (accountId: string) => {
+    if (!engine || accountId === nextAccount || (switchApplying && accountId === runsOnAccount)) return;
+    const previous = readPickedAccount(cardId);
+    setPickedAccount(cardId, accountId);
+    /* The pick carries the draft, so a model change still waiting is folded into it and ends quietly. */
+    operationRef.current = null;
+    localStorage.removeItem(phaseKey(file));
+    localStorage.removeItem(phaseOperationKey(file));
+    setApplyState((state) => (state === "pending" || state === "confirming" || state === "error" ? "idle" : state));
+    setAnnounce(accountId === runsOnAccount
+      ? t("mobile2.composer.accountRunsOn", { account: nameOf(accountId) })
+      : t("mobile2.composer.accountRunsOnNext", { account: nameOf(runsOnAccount), next: nameOf(accountId) }));
+    const draft = liveDraftRef.current;
+    try {
+      const response = await fetch("/api/tmux", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "reconfigure",
+          path: file.path,
+          conversationId: runtimeConversationId,
+          model: draft.model,
+          effort: draft.effort,
+          fast: engine === "codex" ? draft.fast : undefined,
+          accountId,
+        }),
+      });
+      const body = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!response.ok || !body.ok) throw new Error(body.error ?? t("runtimeConfig.failed"));
+    } catch (cause) {
+      if (readPickedAccount(cardId) === accountId) setPickedAccount(cardId, previous);
+      pushTaskToast("err", cause instanceof Error ? cause.message : t("runtimeConfig.failed"));
+    }
+  }, [cardId, engine, file, nameOf, nextAccount, runsOnAccount, runtimeConversationId, switchApplying, t]);
+
   const closePopover = useCallback(() => {
     setOpen(false);
     setPanel("root");
     pillRef.current?.focus();
   }, []);
+
+  const accountChoice: AccountChoice | null = pillSurface === "structured"
+    ? {
+        runsOn: runsOnAccount,
+        next: nextAccount,
+        applying: switchApplying,
+        pick: (accountId) => {
+          void pickAccount(accountId);
+          if (!isMobile) closePopover();
+        },
+      }
+    : null;
 
   /* The popover opens where the pill is, in viewport coordinates, because it is
      portalled out of the composer's scrolling box (#1629). */
@@ -455,6 +538,15 @@ export function RuntimePill({
     }
     setOpen(true);
   }, []);
+
+  /* «Pick another account» on a held message opens this conversation's account choice (#1846). */
+  useEffect(() => {
+    if (pillSurface !== "structured") return;
+    return onAccountChoiceRequest(cardId, () => {
+      setPanel(isMobile ? "root" : "account");
+      openPopover();
+    });
+  }, [cardId, isMobile, openPopover, pillSurface]);
 
   /* Choosing what the face already reads is not a change, so it applies
      nothing, sends nothing and just closes (#1795): `commit` would otherwise
@@ -487,11 +579,6 @@ export function RuntimePill({
      message cannot use and names the wall instead (mobile v2 §4.2, §4.4); its
      sheet leads with the accounts that can take the message. */
   const limitedAccount = isMobile ? file.rateLimit?.accountId ?? null : null;
-  /* The account this conversation actually runs on, read off the live
-     transcript path exactly as the card's account badge reads it (#229). No
-     runtime surface named it before, so the operator could not tell which
-     account a message was about to go to (#1795). */
-  const runsOnAccount = accountIdFromPath(file.path);
   const chipText = limitedAccount
     ? t("mobile2.composer.chipAtLimit", { model: faceModelShort, account: limitedAccount })
     : `${faceModelShort} · ${faceTier}`;
@@ -504,7 +591,11 @@ export function RuntimePill({
         aria-haspopup={isMobile ? "dialog" : "menu"}
         aria-expanded={open}
         aria-busy={applying || undefined}
-        aria-label={limitedAccount ? `${t("composer.runtimePill")} — ${chipText}` : faceLabel}
+        aria-label={limitedAccount
+          ? `${t("composer.runtimePill")} — ${chipText}`
+          : accountChoice && moving
+            ? `${faceLabel} · ${t("mobile2.composer.accountRunsOnNext", { account: nameOf(runsOnAccount), next: nameOf(nextAccount) })}`
+            : faceLabel}
         data-runtime-pill
         /* The composer box's chip is what opens the «Next message» sheet
             (mobile v2 §4.4) — the one model/reasoning surface on the phone. */
@@ -544,6 +635,13 @@ export function RuntimePill({
             <span className="max-w-[52vw] truncate md:max-w-[16rem]">
               {faceModelShort} · {faceTier}
             </span>
+            {/* A pick waiting for the next message marks the pill it was made on, so the answer to «did it
+                take» stays where the tap was once the popover closes (#1846 critique). */}
+            {accountChoice && moving ? (
+              <span className="max-w-[10rem] truncate text-accent" data-runtime-pill-next-account>
+                → {nameOf(nextAccount)}
+              </span>
+            ) : null}
             {applying ? (
               <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />
             ) : (
@@ -565,6 +663,8 @@ export function RuntimePill({
           t={t}
           engine={engine}
           account={runsOnAccount}
+          nameOf={nameOf}
+          accountChoice={accountChoice}
           face={face}
           efforts={efforts}
           speedShown={speedShown}
@@ -586,6 +686,8 @@ export function RuntimePill({
           t={t}
           engine={engine}
           account={runsOnAccount}
+          nameOf={nameOf}
+          accountChoice={accountChoice}
           owner={pillRef.current?.ownerDocument ?? document}
           face={face}
           efforts={efforts}
@@ -613,15 +715,96 @@ export function RuntimePill({
   );
 }
 
+/**
+ * #1846: a move that failed when a message engaged it holds that message — unsent, nothing sent twice —
+ * and says why, with the two obvious ways on: send it on the account the conversation runs on, or pick
+ * another account. It takes its own full-width line above the composer's row, so the reason reads in one
+ * or two lines and each way on is a full-size target on a phone.
+ */
+export function RuntimeSwitchHold({ file }: { file: FileEntry }) {
+  const { t } = useLocale();
+  const [released, setReleased] = useState<string | null>(null);
+  const nameOf = useAccountName(file.engine === "codex" ? "codex" : "claude");
+  const hold = file.switchHold && file.switchHold.since !== released ? file.switchHold : null;
+  if (!hold) return null;
+  const runsOn = accountIdFromPath(file.path);
+  const keepCurrent = async () => {
+    if (!file.conversationId) return;
+    setReleased(hold.since);
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(file.conversationId)}/migration`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "keep-current" }),
+      });
+      if (!response.ok) throw new Error(t("runtimeConfig.failed"));
+    } catch (cause) {
+      setReleased(null);
+      pushTaskToast("err", cause instanceof Error ? cause.message : t("runtimeConfig.failed"));
+    }
+  };
+  const action = "inline-flex min-h-11 items-center rounded-control border border-border px-3 text-label font-semibold text-accent hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 md:min-h-8";
+  return (
+    <div className="flex w-full basis-full flex-col gap-1.5 rounded-control bg-danger-soft px-2.5 py-2 text-label" role="alert" data-runtime-switch-hold>
+      <p className="leading-snug text-danger">
+        {t("runtimeConfig.switchHeld", { account: nameOf(hold.targetAccountId), reason: switchHoldReason(t, hold.reason) })}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" data-runtime-switch-hold-keep onClick={() => void keepCurrent()} className={action}>
+          {t("runtimeConfig.sendOnCurrent", { account: nameOf(runsOn) })}
+        </button>
+        <button type="button" data-runtime-switch-hold-pick onClick={() => requestAccountChoice(conversationIdentity(file))} className={action}>
+          {t("runtimeConfig.pickAnotherAccount")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The reason a held message gives, in the operator's language for the causes a move is known to fail on; any
+ * other reason is the server's own text, shown as it came.
+ */
+export function switchHoldReason(t: TFunction, reason: string): string {
+  if (/signed[ _-]?out|not (?:signed|logged) in|requires authentication|authentication required|unauthori[sz]ed|\b401\b/i.test(reason)) return t("runtimeConfig.switchReasonSignedOut");
+  if (/usage limit|rate[ _-]?limit|limit reached|\b429\b/i.test(reason)) return t("runtimeConfig.switchReasonLimit");
+  if (/refused|rejected|forbidden|\b403\b/i.test(reason)) return t("runtimeConfig.switchReasonRefused");
+  return reason;
+}
+
 // ---------------------------------------------------------------------------
 // Desktop popover — a WAI-APG menu with an in-place Model/Speed drill-down.
 // ---------------------------------------------------------------------------
+
+type Panel = "root" | "model" | "speed" | "account";
+
+/** A per-conversation account choice on a structured conversation (#1846). */
+interface AccountChoice {
+  /** The account the conversation runs on now. */
+  runsOn: string;
+  /** Where the next message goes: the intended account while a pick waits, else `runsOn`. */
+  next: string;
+  /** A message engaged the pick and the conversation is moving now: it can no longer be taken back. */
+  applying: boolean;
+  pick: (accountId: string) => void;
+}
+
+/** «runs on A», or «runs on A · next on B» while a pick waits for the next message (#1846), by the names the rows use. */
+function accountLine(t: TFunction, account: string, choice: AccountChoice | null | undefined, nameOf: (id: string) => string): string {
+  return choice && choice.next !== account
+    ? t("mobile2.composer.accountRunsOnNext", { account: nameOf(account), next: nameOf(choice.next) })
+    : t("mobile2.composer.accountRunsOn", { account: nameOf(account) });
+}
 
 interface PanelProps {
   t: TFunction;
   engine: "claude" | "codex";
   /** The account this conversation runs on, which both surfaces name (#1795). */
   account: string;
+  /** The name an account goes by: its label, else its id (#1846). */
+  nameOf: (id: string) => string;
+  /** Present on a structured conversation, whose account is chosen per conversation (#1846). */
+  accountChoice?: AccountChoice | null;
   face: RuntimeDraft;
   efforts: readonly string[];
   speedShown: boolean;
@@ -636,12 +819,12 @@ interface PanelProps {
 }
 
 function RuntimePopover({
-  t, engine, account, face, efforts, speedShown, panel, setPanel,
+  t, engine, account, nameOf, accountChoice, face, efforts, speedShown, panel, setPanel,
   effortLocked, modelLocked, speedLocked, lockReason,
   onSelectEffort, onSelectModel, onSelectFast, onClose, at, owner,
 }: PanelProps & {
-  panel: "root" | "model" | "speed";
-  setPanel: (p: "root" | "model" | "speed") => void;
+  panel: Panel;
+  setPanel: (p: Panel) => void;
   /* Viewport coordinates of the pill it belongs to. */
   at: { bottom: number; left: number };
   owner: Document;
@@ -649,13 +832,15 @@ function RuntimePopover({
   const rootRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
+  /* Read only once the Account panel opens, so the ordinary popover subscribes to no accounts store. */
+  const [accountOptions, setAccountOptions] = useState<readonly AccountOption[] | null>(null);
 
   // Rows for the current panel (document order), each with an enabled flag.
   const rows = useMemo(() => buildRows({
     t, engine, face, efforts, speedShown, panel, effortLocked, modelLocked, speedLocked, lockReason,
-    onSelectEffort, onSelectModel, onSelectFast, onOpenPanel: setPanel,
+    onSelectEffort, onSelectModel, onSelectFast, onOpenPanel: setPanel, accountChoice, accountOptions, nameOf,
   }), [t, engine, face, efforts, speedShown, panel, effortLocked, modelLocked, speedLocked, lockReason,
-    onSelectEffort, onSelectModel, onSelectFast, setPanel]);
+    onSelectEffort, onSelectModel, onSelectFast, setPanel, accountChoice, accountOptions, nameOf]);
 
   const focusableIndexes = useMemo(
     () => rows.map((row, index) => (row.enabled ? index : -1)).filter((index) => index >= 0),
@@ -738,7 +923,7 @@ function RuntimePopover({
               carries the badge in its header; the popover is where the runtime
               is chosen, so it says it here too. */}
           <div className="px-2 pb-1 pt-1.5 text-label text-muted" data-runtime-popover-account>
-            {t("mobile2.composer.accountRunsOn", { account })}
+            {accountLine(t, account, accountChoice, nameOf)}
           </div>
           <RowGroup label={t("composer.reasoningGroup")}>
             {rows.filter((row) => row.kind === "tier").map((row) => (
@@ -751,7 +936,8 @@ function RuntimePopover({
           ))}
         </>
       ) : (
-        <div role="group" aria-label={panel === "model" ? t("composer.modelGroup") : t("composer.speedGroup")}>
+        <div role="group" aria-label={panel === "model" ? t("composer.modelGroup") : panel === "account" ? t("mobile2.composer.accountGroup") : t("composer.speedGroup")}>
+          {panel === "account" && accountChoice ? <EngineAccountsFeed engine={engine} onAccounts={setAccountOptions} /> : null}
           {rows.map((row, index) => (
             <MenuRow key={row.key} row={row} active={index === activeIndex} refFor={(el) => { rowRefs.current[index] = el; }} />
           ))}
@@ -774,26 +960,48 @@ function RowGroup({ label, children }: { label: string; children: React.ReactNod
 
 interface Row {
   key: string;
-  kind: "tier" | "submenu" | "back" | "model" | "speed";
+  kind: "tier" | "submenu" | "back" | "model" | "speed" | "account";
   label: string;
   /** Accessible name when it must differ from the visible label (the back row:
       "Back — Model", so it never collides with the submenu row's name). */
   ariaLabel?: string;
   detail?: string;
+  /** The detail names what the row does (take a waiting pick back), in the accent colour. */
+  detailAction?: boolean;
   checked: boolean;
   enabled: boolean;
   reason?: string;
-  submenu?: "model" | "speed";
+  submenu?: "model" | "speed" | "account";
   role: "menuitemradio" | "menuitem";
   activate: () => void;
 }
 
+interface AccountOption {
+  id: string;
+  label: string;
+}
+
+/** Feeds the popover's Account panel the engine's signed-in accounts while that panel is open. */
+function EngineAccountsFeed({ engine, onAccounts }: {
+  engine: "claude" | "codex";
+  onAccounts: (accounts: readonly AccountOption[]) => void;
+}) {
+  const state = useEngineAccounts(engine);
+  useEffect(() => {
+    onAccounts(state.accounts
+      .filter((option) => option.authPresent && (option.authHealth ?? "unknown") !== "signed_out" && !option.loginPending)
+      .map((option) => ({ id: option.id, label: option.label })));
+  }, [onAccounts, state.accounts]);
+  return null;
+}
+
 function buildRows({
   t, engine, face, efforts, speedShown, panel, effortLocked, modelLocked, speedLocked, lockReason,
-  onSelectEffort, onSelectModel, onSelectFast, onOpenPanel,
+  onSelectEffort, onSelectModel, onSelectFast, onOpenPanel, accountChoice, accountOptions, nameOf,
 }: Omit<PanelProps, "onClose" | "account"> & {
-  panel: "root" | "model" | "speed";
-  onOpenPanel: (panel: "root" | "model" | "speed") => void;
+  panel: Panel;
+  onOpenPanel: (panel: Panel) => void;
+  accountOptions?: readonly AccountOption[] | null;
 }): Row[] {
   const back = (label: string): Row => ({
     key: "back", kind: "back", label, checked: false, enabled: true, role: "menuitem",
@@ -814,6 +1022,36 @@ function buildRows({
         reason: modelLocked ? lockReason : undefined,
         role: "menuitemradio",
         activate: () => onSelectModel(model.id),
+      })),
+    ];
+  }
+  if (panel === "account" && accountChoice) {
+    /* The account it runs on is always a row, so a waiting pick can be taken back even when that account is
+       the legacy home the accounts list does not enumerate. */
+    const options = accountOptions ?? [];
+    const listed = options.some((option) => option.id === accountChoice.runsOn)
+      ? options
+      : [{ id: accountChoice.runsOn, label: nameOf(accountChoice.runsOn) }, ...options];
+    return [
+      back(t("mobile2.composer.accountGroup")),
+      ...listed.map((option): Row => ({
+        key: `account-${option.id}`,
+        kind: "account",
+        label: option.label,
+        /* While a pick waits, the running account is the way back, and says so as the action it is: the head
+           above already names it as the one the conversation runs on (#1846 critique). */
+        ...(option.id !== accountChoice.runsOn
+          ? {}
+          : accountChoice.next === accountChoice.runsOn
+            ? { detail: t("mobile2.composer.accountCurrent") }
+            : accountChoice.applying
+              ? { detail: t("mobile2.composer.accountSwitching") }
+              : { detail: t("mobile2.composer.accountCancelSwitch"), detailAction: true }),
+        checked: option.id === accountChoice.next,
+        /* A move under way cannot be taken back, so the account it leaves is not a choice until it lands. */
+        enabled: !(accountChoice.applying && option.id === accountChoice.runsOn && accountChoice.next !== accountChoice.runsOn),
+        role: "menuitemradio",
+        activate: () => accountChoice.pick(option.id),
       })),
     ];
   }
@@ -846,6 +1084,14 @@ function buildRows({
       key: "speed", kind: "submenu", label: t("composer.speedGroup"),
       detail: face.fast ? t("composer.speedFastTier") : t("composer.speedStandard"),
       checked: false, enabled: true, submenu: "speed", role: "menuitem", activate: () => onOpenPanel("speed"),
+    });
+  }
+  /* A structured conversation chooses its own account here, and the row says where the next message goes. */
+  if (accountChoice) {
+    submenus.push({
+      key: "account", kind: "submenu", label: t("mobile2.composer.accountGroup"),
+      detail: nameOf(accountChoice.next),
+      checked: false, enabled: true, submenu: "account", role: "menuitem", activate: () => onOpenPanel("account"),
     });
   }
   return [...tiers, ...submenus];
@@ -899,7 +1145,9 @@ function MenuRow({
       }`}
     >
       <span className="min-w-0 flex-1 truncate">{row.label}</span>
-      {row.detail ? <span className="shrink-0 text-caption text-muted">{row.detail}</span> : null}
+      {row.detail ? (
+        <span className={`shrink-0 text-caption ${row.detailAction ? "font-semibold text-accent" : "text-muted"}`} data-runtime-row-detail={row.detailAction ? "action" : undefined}>{row.detail}</span>
+      ) : null}
       {row.checked ? <Check className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden /> : null}
       {isSubmenu ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden /> : null}
     </button>
@@ -914,7 +1162,7 @@ function MenuRow({
 // ---------------------------------------------------------------------------
 
 function RuntimeSheet({
-  t, engine, account, owner, face, efforts, speedShown,
+  t, engine, account, nameOf, accountChoice, owner, face, efforts, speedShown,
   effortLocked, modelLocked, speedLocked, lockReason, limit = null,
   onSelectEffort, onSelectModel, onSelectFast, onClose,
 }: PanelProps & { limit?: RateLimitState | null; owner: Document }) {
@@ -985,7 +1233,7 @@ function RuntimeSheet({
           </div>
         </div>
 
-        <AccountSection t={t} engine={engine} account={account} limit={limit} />
+        <AccountSection t={t} engine={engine} account={account} nameOf={nameOf} limit={limit} choice={accountChoice ?? null} />
 
         <SheetSection label={t("composer.modelGroup")}>
           {ENGINE_MODELS[engine].map((model) => (
@@ -1073,12 +1321,16 @@ function limitResetClock(limit: RateLimitState): string | null {
  * Mounted with the sheet and nothing else, so the ordinary chip still
  * subscribes to the accounts store only while the sheet is open.
  */
-function AccountSection({ t, engine, account, limit }: {
+function AccountSection({ t, engine, account, nameOf, limit, choice }: {
   t: TFunction;
   engine: "claude" | "codex";
   /** The account this conversation runs on. */
   account: string;
+  nameOf: (id: string) => string;
   limit: RateLimitState | null;
+  /** A structured conversation chooses its own account (#1846): a tap records its intended account at once,
+      and the conversation moves there with its next message. Absent, a tap moves the engine's launch account. */
+  choice: AccountChoice | null;
 }) {
   const state = useEngineAccounts(engine);
   const reset = limit ? limitResetClock(limit) : null;
@@ -1093,7 +1345,7 @@ function AccountSection({ t, engine, account, limit }: {
         {/* Named even when no row carries it: the legacy home is an account
             the accounts list does not enumerate. */}
         <span className="min-w-0 truncate text-label text-muted" data-runtime-sheet-account-current>
-          {t("mobile2.composer.accountRunsOn", { account })}
+          {accountLine(t, account, choice, nameOf)}
         </span>
       </div>
       {ordered.map((option) => {
@@ -1111,9 +1363,14 @@ function AccountSection({ t, engine, account, limit }: {
            the engine would launch from can be one that cannot take a message:
            marking it «next message» and making it inert took its sign-in row
            away, which is the one thing that could fix it (#1795 review P2). */
-        const next = !blocked && authenticated && option.id === state.active;
+        const next = !blocked && authenticated && option.id === (choice ? choice.next : state.active);
         /* Already the target, or walled, or unreachable: nothing to send. */
-        const inert = blocked || next || (!authenticated && !signInReachable);
+        /* While a pick waits, the account it runs on is the way back, and says so (#1846); once a message
+           engaged the pick and the move is under way, it is too late for that. */
+        const leaving = Boolean(choice) && current && !next && choice!.next !== account;
+        const switching = leaving && choice!.applying;
+        const cancels = leaving && !switching;
+        const inert = blocked || next || switching || (!authenticated && !signInReachable);
         return (
           <button
             key={option.id}
@@ -1121,7 +1378,7 @@ function AccountSection({ t, engine, account, limit }: {
             data-runtime-sheet-account={option.id}
             data-runtime-account-state={blocked ? "limit" : !authenticated ? "needs-sign-in" : current ? "current" : "ready"}
             data-runtime-account-next={next ? "true" : undefined}
-            disabled={inert || state.mutation !== null}
+            disabled={inert || (!choice && state.mutation !== null)}
             aria-disabled={inert || undefined}
             aria-label={blocked
               ? t("mobile2.composer.accountAtLimit", { account: option.label, time: reset ?? "" }).trim()
@@ -1129,13 +1386,18 @@ function AccountSection({ t, engine, account, limit }: {
                 ? t("mobile2.composer.accountSignInAria", { account: option.label })
                 : next
                   ? t("mobile2.composer.accountNextAria", { account: option.label })
-                  : t("mobile2.composer.accountReadyAria", { account: option.label })}
+                  : switching
+                    ? t("mobile2.composer.accountSwitchingAria", { account: option.label })
+                    : cancels
+                    ? t("mobile2.composer.accountCancelSwitchAria", { account: option.label })
+                    : t("mobile2.composer.accountReadyAria", { account: option.label })}
             onClick={() => {
               if (inert) return;
               /* An account that is not signed in goes to the device sign-in and
                  stays out of the launch: `select` is never reached from here. */
-              if (authenticated) void state.select(option.id);
-              else void state.retryLogin(option.id);
+              if (!authenticated) void state.retryLogin(option.id);
+              else if (choice) choice.pick(option.id);
+              else void state.select(option.id);
             }}
             className={`flex min-h-11 w-full items-center gap-2 rounded-control px-2 text-left text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-100 ${
               blocked || (!authenticated && !signInReachable) ? "text-secondary" : "text-primary"
@@ -1164,6 +1426,10 @@ function AccountSection({ t, engine, account, limit }: {
                 <span className="shrink-0 text-label font-semibold text-accent">{t("mobile2.composer.accountNext")}</span>
                 <Check className="h-4 w-4 shrink-0 text-accent" aria-hidden />
               </>
+            ) : switching ? (
+              <span className="shrink-0 text-label font-semibold text-muted" data-runtime-account-switching>{t("mobile2.composer.accountSwitching")}</span>
+            ) : cancels ? (
+              <span className="shrink-0 text-label font-semibold text-accent" data-runtime-account-cancel>{t("mobile2.composer.accountCancelSwitch")}</span>
             ) : (
               <span className="shrink-0 text-label font-semibold text-muted">{t("mobile2.composer.accountReady")}</span>
             )}

@@ -41,6 +41,10 @@ export interface StructuredDeliveryQueuePort {
   deferTarget?(conversationId: string): boolean;
   /** A reconfigure withdrawn before its claim, or whose claimed switch was cancelled (#1705). */
   reconfigureCancelled?(effect: StructuredReconfigureEffect): boolean;
+  /** The failed account switch holding this conversation's messages, or null (#1846). */
+  switchHold?(conversationId: string): { accountId: string; reason: string } | null;
+  /** Records that the account switch a message engaged failed, so that message and the ones after it stay held. */
+  holdForFailedSwitch?(effect: StructuredReconfigureEffect, reason: string): void;
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
   transition(
     operationId: string,
@@ -233,6 +237,16 @@ function isCompactEffect(effect: DeliveryEffect): effect is CompactEffect {
 
 function isReconfigureEffect(effect: DeliveryEffect): effect is StructuredReconfigureEffect {
   return effect.kind === "reconfigure";
+}
+
+/** An account pick that has not started moving the conversation: it waits for the next engagement (#1846). */
+function isParkableSwitch(effect: DeliveryEffect, receipt: StructuredOperationStatus | null): boolean {
+  return isReconfigureEffect(effect) && Boolean(effect.accountId) && receipt?.status !== "applying";
+}
+
+/** What engages a conversation: a message for its next turn. */
+function isEngagement(effect: DeliveryEffect): boolean {
+  return effect.kind === "send" || effect.kind === "steer" || effect.kind === "native-queue";
 }
 
 function isRuntimeControlEffect(
@@ -838,7 +852,9 @@ export class StructuredDeliveryQueue {
         this.contendedRecoveries.delete(effect.operationId);
         continue;
       }
-      const expired = isRuntimeControlEffect(effect)
+      /* An account pick is an intent, and it waits for the next engagement however long that is (#1846):
+         the settlement window is for a control that got stuck, which a switch nobody has engaged is not. */
+      const expired = isRuntimeControlEffect(effect) && !isParkableSwitch(effect, durable.value)
         ? expiredControlSettlement(effect, durable.value)
         : null;
       if (expired) {
@@ -860,6 +876,11 @@ export class StructuredDeliveryQueue {
         await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "superseded" });
       }
     }
+    /* #1846: an account pick moves the conversation when it is next engaged, never on its own. */
+    const engaged = effects.some(isEngagement);
+    const conversationId = effects[0]?.conversationId;
+    const readHold = () => conversationId ? this.port.switchHold?.(conversationId) ?? null : null;
+    let hold = readHold();
     for (const effect of effects) {
       /* #862: a compaction in flight holds back everything that would write to
          the thread — messages and reconfigures — but never another control.
@@ -876,11 +897,15 @@ export class StructuredDeliveryQueue {
           await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "conversation-killed" });
           continue;
         }
+        if (effect.accountId && !engaged && !this.port.reconfigureCancelled?.(effect)
+          && durableStatuses.get(effect.operationId)?.status !== "applying") continue;
         const blocked = await this.drainReconfigure(effect);
         if (blocked) {
           this.scheduleControlSettlementCheck(durableStatuses.get(effect.operationId) ?? null);
           return true;
         }
+        /* A switch that moved releases the hold an earlier failed one left. */
+        hold = readHold();
         continue;
       }
       if (isControlEffect(effect)) {
@@ -906,6 +931,10 @@ export class StructuredDeliveryQueue {
         }
         continue;
       }
+      /* A failed account switch holds every message after it until the operator sends on the current account or
+         picks another one (#1846). The registry keeps the hold and its reason, and the message stays queued where
+         it is: nothing reaches any engine, so nothing can be sent twice. */
+      if (hold && isEngagement(effect)) continue;
       if (effect.kind === "native-queue") {
         if (!this.port.nativeQueueExecute) throw new Error("native queue executor is unavailable");
         const boundary = this.successfulKillBoundaries.get(effect.conversationId);
@@ -1674,6 +1703,13 @@ export class StructuredDeliveryQueue {
       await this.transitionUnlessSettled(effect.operationId, "applied");
     } catch (error) {
       await this.transitionUnlessSettled(effect.operationId, "failed", { reason: failureReason(error) });
+      /* A move that failed at engagement keeps the message that engaged it (#1846). A superseded or cancelled
+         switch ended by the operator's own later choice, which is not a failure to hold anything for. */
+      if (effect.accountId && !this.port.reconfigureCancelled?.(effect)
+        && error instanceof Error && error.name !== "StructuredReconfigureSupersededError" && error.name !== "StructuredReconfigureCancelledError") {
+        this.port.holdForFailedSwitch?.(effect, failureReason(error));
+        return true;
+      }
     }
     return false;
   }

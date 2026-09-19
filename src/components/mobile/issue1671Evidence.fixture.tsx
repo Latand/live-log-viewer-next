@@ -79,6 +79,11 @@ const pipelines = [
    390 px meta line. */
 const ACCOUNT = new URLSearchParams(location.search).get("account") || "spare";
 const RUNNING_PATH = `/state/agent-log-viewer/shared/accounts/claude/${ACCOUNT}/projects/atlas/running.jsonl`;
+/* #1846: `&runtime=structured` puts the running conversation on a structured host, mid-turn, so its runtime
+   pill picks an account for the conversation itself; `&next=` names the account ready to take the next
+   message, which with a long running id is what the title line has to hold as well. */
+const STRUCTURED = new URLSearchParams(location.search).get("runtime") === "structured";
+const NEXT_ACCOUNT = new URLSearchParams(location.search).get("next") || "relief";
 
 /* With the deck asked for (#1795 below), the running conversation is the round
    under review, and says so the way a reviewer transcript does. */
@@ -191,6 +196,18 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   /* The fixture has no runtime plane, and says so the way a Viewer without one
      does. Left unanswered, the bus escalated to «Runtime degraded» part-way
      through a run, and the banner moved the list under a measured tap. */
+  if (url.pathname === "/api/runtime/snapshot" && STRUCTURED) {
+    return json({
+      schemaVersion: 1, snapshotSeq: 1, retentionFloorSeq: 0, structuredHostsEnabled: true, runtime: { hostEpoch: 1, health: "ready" }, filesRevision: 1,
+      sessions: [{
+        conversationId: "conversation_running", sessionKey: { engine: "claude", sessionId: "running-session" }, hostKind: "claude-broker", host: "hosted",
+        turn: "running", provenance: "structured", revision: 1, attentionIds: [], recentReceipts: [], accountId: ACCOUNT,
+        parentConversationId: null, flowId: null, workflowId: null, cwd: "/repo", artifactPath: RUNNING_PATH,
+        capabilities: { steer: false, structuredAttention: true }, activeTurnId: "turn-1", pendingReconfigure: null,
+      }],
+      attentions: [], recentOperations: [], edges: [], flows: [], workflows: [], tasks: [], deployments: [],
+    });
+  }
   if (url.pathname === "/api/runtime/snapshot") return json({ code: RUNTIME_PLANE_ABSENT }, 503);
   if (url.pathname === "/api/board") {
     if (method === "PATCH") {
@@ -228,7 +245,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         active: activeAccount,
         accounts: [
           { id: ACCOUNT, label: ACCOUNT, kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
-          { id: "relief", label: "relief", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
+          { id: NEXT_ACCOUNT, label: NEXT_ACCOUNT, kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
           { id: "dormant", label: "dormant", kind: "managed", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
         ],
         migration: null, autoBalance: null,
@@ -245,7 +262,7 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (url.pathname === "/api/tmux" && method === "POST") {
     evidence.runtimeRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-    return json({ ok: true, outcome: "pending", operationId: "reconfigure-evidence" });
+    return json(STRUCTURED ? { ok: true, structured: true } : { ok: true, outcome: "pending", operationId: "reconfigure-evidence" });
   }
   if (url.pathname.startsWith("/api/pipelines/") && method === "PATCH") {
     const id = decodeURIComponent(url.pathname.split("/").pop() ?? "");

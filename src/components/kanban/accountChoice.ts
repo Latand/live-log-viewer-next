@@ -15,8 +15,9 @@ import { pipelineEnded, stageNotStarted } from "./stagesModel";
  *   project's binding does not allow; `null` clears the pin, and the project's
  *   own selection picks the account at launch.
  * - A conversation switches with the same `reconfigure` the conversation
- *   header's account chip sends. The switch waits for the running turn to end;
- *   an account outside the project's accounts is allowed and recorded as the
+ *   header's account chip sends. It records the conversation's intended
+ *   account, and the conversation moves with its next message (#1846); an
+ *   account outside the project's accounts is allowed and recorded as the
  *   operator's choice (#1279).
  *
  * What the board may say about a pending switch comes from what reports it,
@@ -224,6 +225,32 @@ function decide(pipeline: Pipeline | null, stageId: string, account: string | nu
 }
 
 /* ── A conversation's account switch ───────────────────────────────────── */
+
+/**
+ * #1846: the pick an account surface on this page just made, before the
+ * runtime session projects it, laid over what the board reads. It stands for
+ * the conversation's intended account: the running account (a pick taken
+ * back) reads as no switch at all, any other as waiting for the next message.
+ * A switch a message has already engaged (a migration record waiting behind a
+ * turn, or one moving) is the server's to report and is left as it is.
+ */
+export function withLocalPick(view: SwitchView, current: string, localPick: string | null): SwitchView {
+  if (localPick === null) return view;
+  if (view.kind === "switching" || (view.kind === "waiting" && view.source === "record")) return view;
+  /* A view that already names this pick says more about it (known to this page only, not confirmed), except
+     that a pick is never "sending": it shows as chosen before any answer. */
+  if (view.kind !== "none" && view.kind !== "sending" && view.target === localPick) return view;
+  return localPick === current ? { kind: "none" } : { kind: "waiting", target: localPick, source: "pick" };
+}
+
+/**
+ * A pick that waits for the conversation's next message and that the runtime session projects, or that this
+ * page's shared store holds (#1846): any account choice replaces it or takes it back as one reconfigure. A
+ * switch known to this page alone (no runtime plane to project it) keeps the withdraw by its operation.
+ */
+export function isWaitingPick(view: SwitchView): boolean {
+  return view.kind === "waiting" && (view.source === "runtime" || view.source === "pick");
+}
 
 /** A switch this page asked for, kept until the conversation, its migration record or its receipt settles it. */
 export interface SwitchRequest {
@@ -441,7 +468,8 @@ export async function postConversationSwitch(body: SwitchBody, fetcher: (input: 
   return { kind: "unknown" };
 }
 
-export type SwitchSource = "record" | "runtime" | "page";
+/* `pick`: the operator's pick on this page, shared by every account surface and shown before any answer (#1846). */
+export type SwitchSource = "record" | "runtime" | "page" | "pick";
 
 /** A reconfigure the runtime session reports as queued or applying, with its operation's receipt status. */
 export interface RuntimePendingSwitch {

@@ -32,7 +32,8 @@ export function RateLimitBadge({
   shrinkable?: boolean;
 }) {
   const { locale, t } = useLocale();
-  const [reseat, setReseat] = useState<"idle" | "pending" | "requested" | "already-reseated" | "failed">("idle");
+  const [reseat, setReseat] = useState<"idle" | "pending" | "requested" | "intended" | "already-reseated" | "failed">("idle");
+  const [reseatTarget, setReseatTarget] = useState<string | null>(null);
   const [reseatPhase, setReseatPhase] = useState<string | null>(null);
   const [reseatError, setReseatError] = useState<string | null>(null);
   const limit = rateLimit ?? file?.rateLimit;
@@ -40,8 +41,13 @@ export function RateLimitBadge({
   const label = rateLimitText(t, locale, limit);
   const canReseat = Boolean(file?.conversationId && !file.migration);
   const busy = reseat === "pending" || reseat === "requested";
-  const settled = reseat === "already-reseated";
-  const buttonTitle = settled
+  /* #1846: a structured conversation's reseat is a recorded choice, and the conversation moves with its next
+     message, so there is nothing to wait for here. */
+  const settled = reseat === "already-reseated" || reseat === "intended";
+  const intendedText = t("rateLimit.reseatIntended", { account: reseatTarget ?? "" });
+  const buttonTitle = reseat === "intended"
+    ? intendedText
+    : settled
     ? t("rateLimit.reseatAlready")
     : reseatError ?? (reseat === "requested" && reseatPhase === "waiting-turn" ? t("rateLimit.reseatWaitingTurn") : t("rateLimit.reseatTitle"));
   return (
@@ -70,8 +76,9 @@ export function RateLimitBadge({
                  the stale card must never look like it started a new reseat.
                  Otherwise stay disabled until the next poll swaps in the
                  migration ribbon; the server is idempotent either way. */
-              setReseat(result.state === "already-reseated" ? "already-reseated" : "requested");
+              setReseat(result.state === "already-reseated" || result.state === "intended" ? result.state : "requested");
               setReseatPhase(result.phase);
+              setReseatTarget(result.targetLabel ?? null);
             } else {
               setReseat("failed");
               setReseatError(result.error);
@@ -86,7 +93,7 @@ export function RateLimitBadge({
           ) : (
             <RefreshCcw className="h-2.5 w-2.5" aria-hidden />
           )}
-          {settled ? t("rateLimit.reseatAlready") : reseat === "requested" ? t("rateLimit.reseatRequested") : t("rateLimit.reseat")}
+          {reseat === "intended" ? intendedText : settled ? t("rateLimit.reseatAlready") : reseat === "requested" ? t("rateLimit.reseatRequested") : t("rateLimit.reseat")}
         </button>
       ) : null}
       {reseat === "failed" ? (

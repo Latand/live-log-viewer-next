@@ -654,6 +654,14 @@ export async function bindStructuredDeliveryQueue(
     {
       deferTarget: (conversationId) => startupPending && hostResolver(registry, hosts)(conversationId) === null,
       reconfigureCancelled: (effect) => registry.reconfigureCancelled(effect.conversationId as ViewerConversationId, effect.operationId),
+      switchHold: (conversationId) => registry.switchHold(conversationId as ViewerConversationId),
+      holdForFailedSwitch: (effect, reason) => {
+        registry.holdForFailedSwitch(effect.conversationId as ViewerConversationId, {
+          operationId: effect.operationId,
+          accountId: effect.accountId!,
+          reason,
+        });
+      },
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
       nativeQueueExecute: (command, refusalReason) => nativeQueueExecutor.execute(command, refusalReason),
       nativeQueueReconcile: async () => {
