@@ -73,6 +73,7 @@ import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
 import { createSubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import type { SubagentTrayApi } from "./SubagentTrayView";
+import { Z } from "@/components/layers";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
@@ -178,7 +179,7 @@ interface Props {
   onAddAgent?: (band: { id: string; task: BoardTask | null; title: string }) => void;
   /** The dashboard's board/list switch (#1614). It is passed in rather than
       floated over the canvas by the caller because both claim the same top-left
-      corner: the tool palette below floats at `z-40`, so a switch positioned
+      corner: the tool palette below floats on the `dock` layer, so a switch positioned
       there separately is drawn under it and a click at its centre lands on a
       tool button. Rendered as the leading item of that one palette, the two
       cannot overlap at any viewport size. */
@@ -1593,7 +1594,7 @@ export function SchemeBoard({
 
       {/* Screen-space marquee: only this small subtree changes per drag frame. */}
       {marquee ? (
-        <div aria-hidden className="pointer-events-none absolute inset-0 z-30">
+        <div aria-hidden className={`pointer-events-none absolute inset-0 ${Z.sticky}`}>
           <div
             className="absolute rounded-[4px] border border-accent/70 bg-accent/10"
             style={{ left: marquee.rect.x, top: marquee.rect.y, width: marquee.rect.w, height: marquee.rect.h }}
@@ -1626,7 +1627,7 @@ export function SchemeBoard({
         onFit={fitRect}
       />
 
-      <div data-scheme-ui data-chip-keepout className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
+      <div data-scheme-ui data-chip-keepout className={`absolute left-3 top-3 ${Z.dock} flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1`}>
         {mapMode ? null : (
           <>
             {viewSwitch ? (
@@ -1705,16 +1706,18 @@ export function SchemeBoard({
           type="button"
           data-scheme-ui
           data-scheme-order-updated
-          className="absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-full border border-accent/45 bg-card px-3 py-1 text-[11.5px] font-semibold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`absolute left-1/2 top-3 ${Z.sticky} -translate-x-1/2 rounded-full border border-accent/45 bg-card px-3 py-1 text-[11.5px] font-semibold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
           title={t("bands.orderUpdatedTitle")}
           onClick={applyPendingOrder}
         >
           {t("bands.orderUpdated")}
         </button>
       ) : null}
-      {controlsFlow ? <div className="absolute right-3 top-3 z-[60]"><GroupOverridePanel group={{key:controlsFlow.id,id:controlsFlow.id,kind:"flow",flow:controlsFlow,label:t("taskHistory.reviewFlow"),hue:0,members:[],x:0,y:0,w:0,h:0}} onClose={() => setControlsFlowId(null)} /></div> : null}
-      {controlsPipeline ? <div className="absolute inset-y-3 right-3 z-[60] overflow-auto rounded-xl border border-border bg-card p-2 shadow-2"><PipelineEditor pipeline={controlsPipeline} label={controlsPipeline.task} onClose={() => setControlsPipelineId(null)} /></div> : null}
       {historyOpen && <TaskWorkflowPanel key={historyTaskId} initialTaskId={historyTaskId} model={workflowModel} onOpenPipeline={openPipelineControls} onOpenFlow={openFlowControls} onOpen={stableSelect} onClose={closeHistory} />}
+      {/* The flow and pipeline controls open FROM the history panel; on the same sheet
+         layer, coming after it in the document is what puts them on top of it. */}
+      {controlsFlow ? <div className={`absolute right-3 top-3 ${Z.sheet}`}><GroupOverridePanel group={{key:controlsFlow.id,id:controlsFlow.id,kind:"flow",flow:controlsFlow,label:t("taskHistory.reviewFlow"),hue:0,members:[],x:0,y:0,w:0,h:0}} onClose={() => setControlsFlowId(null)} /></div> : null}
+      {controlsPipeline ? <div className={`absolute inset-y-3 right-3 ${Z.sheet} overflow-auto rounded-xl border border-border bg-card p-2 shadow-2`}><PipelineEditor pipeline={controlsPipeline} label={controlsPipeline.task} onClose={() => setControlsPipelineId(null)} /></div> : null}
 
       <Minimap
         layout={layout}
@@ -1746,7 +1749,7 @@ export function SchemeBoard({
       const stageTitle = titleUnderRename(stagePaneTitleOf(t, stagePaneByPath.get(expandedNode.file.path)), renameToken);
       return (
         <div
-          className="fixed inset-0 z-40 flex flex-col bg-canvas p-3"
+          className={`fixed inset-0 ${Z.modal} flex flex-col bg-canvas p-3`}
           role="dialog"
           aria-modal="true"
           aria-label={stageTitle ?? cleanTitle(expandedNode.file.title, 90)}

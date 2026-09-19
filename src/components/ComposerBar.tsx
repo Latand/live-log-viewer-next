@@ -14,6 +14,7 @@ import { recallHistory } from "./composerHistory";
 import { Hint } from "./Hint";
 import { ImagePickerButton, ImagePreviewStrip } from "./imageAttachments";
 import { MicButtonView } from "./MicButton";
+import { Z } from "@/components/layers";
 
 export interface SendMenuAction {
   id: string;
@@ -217,7 +218,7 @@ function SendMenu({ label, actions, onClose, position, owner }: {
         right: position.right,
         maxHeight: `calc(100dvh - ${position.bottom}px - 16px)`,
       }}
-      className="fixed z-40 w-[220px] overflow-y-auto rounded-surface border border-border bg-raised p-1.5 shadow-2"
+      className={`fixed ${Z.popover} w-[220px] overflow-y-auto rounded-surface border border-border bg-raised p-1.5 shadow-2`}
     >
       {/* Menu group-label: sentence-case label recipe (design doc §3.6). */}
       <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">

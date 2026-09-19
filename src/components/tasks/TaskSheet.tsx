@@ -19,6 +19,7 @@ import { TaskComposer } from "./TaskComposer";
 import { TASK_STATUS_CYCLE, TASK_TONES, taskTitle } from "./taskModel";
 import { TargetChecklist } from "./TargetChecklist";
 import { pushTaskToast, sendSummary } from "./taskToast";
+import { Z } from "@/components/layers";
 
 export type TaskSheetView = "list" | "new" | { taskId: string };
 
@@ -452,7 +453,7 @@ export function TaskSheet({
   const openTask = typeof view === "object" ? (tasks.find((task) => task.id === view.taskId) ?? null) : null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
+    <div className={`fixed inset-0 ${Z.sheet} flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]`}>
       <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
         {view !== "list" ? (
           <button

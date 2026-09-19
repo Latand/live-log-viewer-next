@@ -11,6 +11,7 @@ import { currentRound, flowLinkPhase, type FlowLinkPhase } from "@/components/sc
 
 import { FLOW_HUB } from "./flowHubGeometry";
 import { flowPresentation, patchFlow } from "./flowModel";
+import { Z } from "@/components/layers";
 
 /* Hub tone per link phase: work in accent, waiting-on-you in amber, done in
    verdict green, idle gray — the palette the strip and verdict chips use. */
@@ -75,7 +76,7 @@ export function FlowHub({
 
   return (
     <div
-      className={`absolute left-0 top-0 ${open ? "z-30" : "z-[5]"} ${interactive ? "" : "pointer-events-none"}`}
+      className={`absolute left-0 top-0 ${open ? Z.popover : "z-[5]"} ${interactive ? "" : "pointer-events-none"}`}
       style={{ transform: `translate(${x}px, ${y}px)`, transition: moveTransition }}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !open) return;
@@ -102,7 +103,7 @@ export function FlowHub({
         <div
           data-scheme-ui
           aria-label={t("flowHub.controls")}
-          className="absolute bottom-[27px] left-0 z-30 flex w-[230px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-2"
+          className={`absolute bottom-[27px] left-0 ${Z.popover} flex w-[230px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-2`}
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} aria-hidden />

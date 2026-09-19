@@ -29,6 +29,7 @@ import { receipts as tabReceipts, type ReceiptStore } from "./mobile/MobileRecei
 import { Badge } from "./ui/Badge";
 import { formatCheckedClock, formatQuotaAsOf, formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
+import { Z } from "@/components/layers";
 
 /** Amber that clears contrast on the panel background — state legibility never
     leans on color alone, so this pairs with the "needs sign-in" text chip. */
@@ -776,14 +777,14 @@ export function AccountsPanel({
           event.stopPropagation();
           onClose();
         }}
-        className="fixed inset-0 z-40 cursor-default sm:hidden"
+        className={`fixed inset-0 ${Z.modal} cursor-default sm:hidden`}
       />
       <div
         role="dialog"
         aria-label={t("accounts.titleFor", { engine: engineName })}
         aria-busy={mutation !== null}
         onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(400px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[14px] border border-border bg-card shadow-2 ${placementClass}`}
+        className={`fixed bottom-3 left-1/2 ${Z.modal} flex w-[min(400px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[14px] border border-border bg-card shadow-2 ${placementClass}`}
       >
         <header className="flex items-center gap-2 border-b border-border px-3 py-2">
           <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: engineTintOf(engine).color }} />

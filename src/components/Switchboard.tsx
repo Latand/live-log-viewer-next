@@ -20,6 +20,7 @@ import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { EngineAccountSwitch } from "./EngineAccountSwitch";
 import { FlipRow } from "./FlipRow";
 import { SwitchCard, type SwitchCardTone } from "./SwitchCard";
+import { Z } from "@/components/layers";
 
 interface Props {
   files: FileEntry[];
@@ -136,7 +137,7 @@ export function Switchboard({ files, flows, project, loaded, catalogFailures = 0
   return (
     <>
       {open ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/28 p-[2.5vh]" onMouseDown={() => setOpen(false)}>
+        <div className={`fixed inset-0 ${Z.modal} flex items-center justify-center bg-primary/28 p-[2.5vh]`} onMouseDown={() => setOpen(false)}>
           <div
             className="flex h-[95vh] w-[95vw] flex-col overflow-hidden rounded-[8px] border border-border bg-canvas shadow-2"
             role="dialog"

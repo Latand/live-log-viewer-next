@@ -10,6 +10,7 @@ import type { BurndownPayload, BurndownSeries } from "@/lib/types";
 import { X } from "./icons";
 import { windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
+import { Z } from "@/components/layers";
 
 const VB_W = 320;
 const VB_H = 150;
@@ -158,7 +159,7 @@ export function BurndownPanel({
       aria-label={t("burndown.openAria", { engine: label })}
       tabIndex={-1}
       onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-      className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0"
+      className={`fixed bottom-3 left-1/2 ${Z.modal} flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0`}
     >
       <header className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-[12.5px] font-bold" style={{ color: tint }}>{label}</span>

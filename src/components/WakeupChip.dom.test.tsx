@@ -80,6 +80,9 @@ test("on the map, tapping the chip reveals the reason and never bubbles to the c
 
   // The reason disclosure opened; the tap did not reach the camera listener.
   expect(btn.getAttribute("aria-expanded")).toBe("true");
-  expect(container.textContent ?? "").toContain("watching the deploy queue");
+  // The bubble is portalled to the document, so no host's overflow cuts it (#1858).
+  const bubble = document.body.querySelector("[role='tooltip']");
+  expect(bubble?.textContent ?? "").toContain("watching the deploy queue");
+  expect(container.contains(bubble)).toBe(false);
   expect(boardTaps).toBe(0);
 });

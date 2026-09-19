@@ -5,6 +5,7 @@ import { CornerUpLeft } from "lucide-react";
 import type { TFunction } from "@/lib/i18n";
 import { MIN_WIDTH, RAIL_WIDTH, RESERVED_BESIDE_DOCK } from "../orchestrator/OrchestratorDock";
 import { useLeftShellInset } from "../shellLayout";
+import { Z } from "@/components/layers";
 
 /** Back stays available after the passive arrival explanation expires. */
 
@@ -43,7 +44,7 @@ export function LaneWithdrawnNote({ text }: { text: string }) {
     <div
       data-scheme-ui
       style={{ left, maxWidth: `min(28rem, calc(100vw - ${left} - 12px))` }}
-      className="pointer-events-none absolute top-[100px] z-40 flex flex-col items-start gap-2"
+      className={`pointer-events-none absolute top-[100px] ${Z.dock} flex flex-col items-start gap-2`}
     >
       <div
         data-testid="attention-lane-withdrawn"
@@ -64,7 +65,7 @@ export function FocusReturnChip({ onReturn, precise, t, arrival }: FocusReturnCh
     <div
       data-scheme-ui
       style={{ left, maxWidth: `min(28rem, calc(100vw - ${left} - 12px))` }}
-      className="pointer-events-none absolute top-[100px] z-40 flex flex-col items-start gap-2"
+      className={`pointer-events-none absolute top-[100px] ${Z.dock} flex flex-col items-start gap-2`}
     >
       {arrival && (
         <div

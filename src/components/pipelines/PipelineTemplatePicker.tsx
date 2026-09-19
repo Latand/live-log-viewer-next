@@ -12,6 +12,7 @@ import {
   type PipelineClientResult,
   type PipelineTemplate,
 } from "./pipelineModel";
+import { Z } from "@/components/layers";
 
 type PickerState =
   | { phase: "checking" }
@@ -102,7 +103,7 @@ export function PipelineTemplatePicker({
   return (
     <div
       data-pipeline-picker-state={state.phase}
-      className="fixed inset-0 z-[70] flex items-end justify-center bg-black/40 sm:items-center"
+      className={`fixed inset-0 ${Z.modal} flex items-end justify-center bg-black/40 sm:items-center`}
       role="presentation"
       onClick={(event) => {
         if (event.target === event.currentTarget && !creating) onClose();

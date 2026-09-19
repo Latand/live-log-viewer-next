@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Check, ChevronDown } from "@/components/icons";
 import { useLocale } from "@/lib/i18n";
+import { Z } from "@/components/layers";
 
 /**
  * Splits a directory so the segment that tells two similar paths apart — the
@@ -327,7 +328,7 @@ export function DirectoryPicker({
       </button>
 
       {open ? (
-        <div className="absolute inset-x-0 top-full z-30 mt-1 flex max-h-[min(60vh,320px)] flex-col overflow-hidden rounded-[10px] border border-border bg-raised shadow-2">
+        <div className={`absolute inset-x-0 top-full ${Z.popover} mt-1 flex max-h-[min(60vh,320px)] flex-col overflow-hidden rounded-[10px] border border-border bg-raised shadow-2`}>
           <input
             ref={inputRef}
             value={query}

@@ -11,6 +11,7 @@ import { useLocale } from "@/lib/i18n";
 import { SeatTickActions, SeatTickBody, SeatTickDot, useSeatTickDraft } from "./SeatTickBody";
 import { seatTickReading } from "./seatTickView";
 import { useSeatTickSettings, type SeatTickSettingsRead } from "./useSeatTickSettings";
+import { Z } from "@/components/layers";
 
 /*
  * The seat tick beside the orchestrator's own controls (#1681).
@@ -130,7 +131,7 @@ function SeatTickPopover({ anchorRef, project, projectName, read, onClose }: {
       tabIndex={-1}
       data-seat-tick-popover={project}
       style={style}
-      className="fixed z-[80] flex max-h-[70vh] w-80 max-w-[calc(100vw-16px)] flex-col overflow-y-auto rounded-surface border border-border bg-card shadow-2 outline-none"
+      className={`fixed ${Z.popover} flex max-h-[70vh] w-80 max-w-[calc(100vw-16px)] flex-col overflow-y-auto rounded-surface border border-border bg-card shadow-2 outline-none`}
     >
       <SeatTickBody
         project={project}

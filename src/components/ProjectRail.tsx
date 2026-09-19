@@ -22,6 +22,7 @@ import { buildProjectSummaries, OVERVIEW, partitionCrownedSummaries, type Projec
 import { PushBell } from "./PushBell";
 import { ResourcesFooter } from "./ResourcesFooter";
 import { fmtAge } from "./utils";
+import { Z } from "@/components/layers";
 
 /**
  * Asks the rail to open the create-project form it already owns (issue #1162).
@@ -404,7 +405,7 @@ function RailHeaderMenu() {
       {open ? (
         <div
           data-rail-menu-panel=""
-          className="absolute right-0 top-[30px] z-40 w-[232px] rounded-[10px] border border-border bg-card p-1 shadow-2"
+          className={`absolute right-0 top-[30px] ${Z.popover} w-[232px] rounded-[10px] border border-border bg-card p-1 shadow-2`}
         >
           <div className="flex items-center gap-2 rounded-[8px] px-2 py-1.5">
             <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">

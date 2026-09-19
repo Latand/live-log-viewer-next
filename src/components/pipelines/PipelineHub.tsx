@@ -7,6 +7,7 @@ import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineAction } from "@/lib/pipelines/types";
 
 import { latestAttempt, patchPipeline, pipelineStateLabel, stageChipLabel } from "./pipelineModel";
+import { Z } from "@/components/layers";
 
 const TONES: Record<Pipeline["state"], string> = {
   draft: "var(--color-warning)",
@@ -83,7 +84,7 @@ export function PipelineHub({
 
   return (
     <div
-      className={`absolute left-0 top-0 ${open ? "z-30" : "z-[5]"} ${interactive ? "" : "pointer-events-none"}`}
+      className={`absolute left-0 top-0 ${open ? Z.popover : "z-[5]"} ${interactive ? "" : "pointer-events-none"}`}
       style={{ transform: `translate(${x}px, ${y}px)${semanticZoom ? " scale(var(--inv-z, 1))" : ""}`, transition: moveTransition, transformOrigin: "top left" }}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !open) return;
@@ -111,7 +112,7 @@ export function PipelineHub({
           role="dialog"
           tabIndex={-1}
           aria-label={t("pipelineHub.controls")}
-          className="absolute bottom-[24px] left-0 z-30 flex w-[224px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-2 focus-visible:outline-none"
+          className={`absolute bottom-[24px] left-0 ${Z.popover} flex w-[224px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-2 focus-visible:outline-none`}
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} aria-hidden />

@@ -9,6 +9,7 @@ import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
 import { saveSessionTitle } from "./sessionTitleApi";
+import { Z } from "@/components/layers";
 
 /** Local, pre-poll view of a rename: `title === null` means the override was
     just cleared (revert to auto). `null` optimistic state means "trust the
@@ -307,7 +308,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
                shrinkable cell and shrank to nothing — an edit field with no
                visible text, caret included. Laid over the row, edge to edge,
                the field owns the width and the controls come back on close. */
-            ? `absolute inset-x-0 top-0 z-20 flex items-center gap-1 bg-card px-2 py-1 ${className}`
+            ? `absolute inset-x-0 top-0 ${Z.lifted} flex items-center gap-1 bg-card px-2 py-1 ${className}`
             : `inline-flex min-w-0 flex-1 items-center gap-1 ${className}`
         }
         onPointerDown={stop}

@@ -7,6 +7,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
 import { useRuntime } from "@/hooks/useRuntime";
+import { Z } from "@/components/layers";
 
 /** Badge tone + status dot per connection state (six-tone vocabulary, §3.7). */
 const TONE: Record<ConnectionState, { badge: BadgeTone; dot: string; pulse: boolean }> = {
@@ -96,7 +97,7 @@ export function ConnectionPillBody({ connection, resynced, legacy, compact, anno
     );
   }
   return (
-    <div className={compact ? "pointer-events-auto absolute right-2 top-1.5 z-30" : "pointer-events-auto fixed bottom-3 left-3 z-20"}>
+    <div className={compact ? `pointer-events-auto absolute right-2 top-1.5 ${Z.sticky}` : `pointer-events-auto fixed bottom-3 left-3 ${Z.sticky}`}>
       <ConnectionPillView connection={connection} resynced={resynced} legacy={legacy} compact={compact} announce={announce} t={t} />
     </div>
   );

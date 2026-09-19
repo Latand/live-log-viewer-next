@@ -8,6 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import { MobileReceipt, type ReceiptStore } from "./MobileReceipt";
 import type { MobileSheetName } from "./mobileNav";
+import { Z } from "@/components/layers";
 
 /*
  * The one sheet (docs/design/mobile-v2/README.md §2 rule 1, §3.3, §5): a
@@ -115,7 +116,7 @@ export function MobileSheet({
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/40"
+      className={`fixed inset-0 ${Z.sheet} flex flex-col justify-end bg-black/40`}
       role="presentation"
       data-mobile2-scrim
       onClick={(event) => {

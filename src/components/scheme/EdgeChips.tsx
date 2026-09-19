@@ -9,6 +9,7 @@ import { useLocale } from "@/lib/i18n";
 import type { SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
 import { chipBox, OVERFLOW_TRIGGER, offscreenClusterChips, overflowListStyle, resolveOverflowPlacement, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
+import { Z } from "@/components/layers";
 
 const transformFor = (edge: ChipEdge): string => {
   if (edge === "right") return "translate(-100%, -50%)";
@@ -277,7 +278,7 @@ export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: 
   if (hidden || coarse || mobile || (!partition.visible.length && !partition.overflow.length)) return null;
 
   return (
-    <nav data-scheme-ui aria-label={t("scheme.offscreenNav")} className="pointer-events-none absolute inset-0 z-[39]">
+    <nav data-scheme-ui aria-label={t("scheme.offscreenNav")} className={`pointer-events-none absolute inset-0 ${Z.sticky}`}>
       {partition.visible.map((chip) => <ChipButton key={chip.cluster.key} chip={chip} onFit={onFit} />)}
       {[...disclosures].map(([edge, { anchor, rows }]) => (
         <OverflowDisclosure

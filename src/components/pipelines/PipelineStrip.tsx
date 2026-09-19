@@ -39,6 +39,7 @@ import {
 import { StagePlaceholderPane } from "./StagePlaceholderPane";
 import { VerdictPopover } from "./VerdictPopover";
 import { humanizeDuration } from "../turnDuration";
+import { Z } from "@/components/layers";
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
@@ -83,12 +84,12 @@ export function verdictPlacement(
  * so a strip near the page header never renders it off-screen. Recomputed on
  * scroll/resize.
  *
- * The portal sits at z-[80] — above the phone's z-[60] bottom sheets
- * (`MobileSheet`), so it stays reachable over one (#507 review F3).
- * The verdict popover and the stage configuration editor both mount here, and a
- * z-[60] portal painted UNDER the sheet's z-[70] backdrop was invisible and
- * unclickable at 390px; z-[80] clears the sheet while staying below the
- * AgentLink full-screen overlay (z-[95]).
+ * The portal sits on the `overlay` layer — above the phone's bottom sheets
+ * (`MobileSheet`) and the modals, so it stays reachable over one (#507 review
+ * F3). The verdict popover and the stage configuration editor both mount here,
+ * and a portal painted under a sheet's backdrop was invisible and unclickable
+ * at 390px; `overlay` clears every sheet and modal while staying below the
+ * AgentLink drag arrow (`feedback`).
  */
 function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -119,7 +120,7 @@ function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLEle
   return createPortal(
     <div
       ref={contentRef}
-      className="fixed z-[80]"
+      className={`fixed ${Z.overlay}`}
       style={
         placement
           ? { left: placement.left, top: placement.top, transform: placement.below ? "translate(-50%, 0)" : "translate(-50%, -100%)" }
@@ -156,7 +157,7 @@ function AnchoredActionMenu({ anchorRef, children }: { anchorRef: RefObject<HTML
   }, [anchorRef]);
   if (typeof document === "undefined") return null;
   return createPortal(
-    <span className="fixed z-[70]" style={{ left: position.left, top: position.top, transform: position.above ? "translateY(-100%)" : undefined }}>
+    <span className={`fixed ${Z.popover}`} style={{ left: position.left, top: position.top, transform: position.above ? "translateY(-100%)" : undefined }}>
       {children}
     </span>,
     document.body,
@@ -166,7 +167,7 @@ function AnchoredActionMenu({ anchorRef, children }: { anchorRef: RefObject<HTML
 /**
  * The on-canvas stage editor as a real modal dialog (#507 review F3 portal +
  * final F2 ownership). It mounts through the {@link AnchoredVerdict} body portal
- * (z-[80], above the phone's z-[60] sheets) and registers as a modal LAYER:
+ * (the `overlay` layer, above the phone's sheets) and registers as a modal LAYER:
  * Tab/Shift+Tab stay inside the editor, Escape closes it, and — because the
  * layer stack hands ownership to the topmost layer — the underlying phone sheet
  * yields its own trap/Escape while this editor is open. The autoFocus close
@@ -202,7 +203,7 @@ function StageConfigDialog({
         autoFocus
         onClick={onClose}
         aria-label={t("pipelineStrip.closeConfig")}
-        className="absolute right-2 top-2 z-20 inline-flex h-7 w-7 items-center justify-center rounded-control border border-border bg-card text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`absolute right-2 top-2 ${Z.lifted} inline-flex h-7 w-7 items-center justify-center rounded-control border border-border bg-card text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
       >
         <X className="h-3.5 w-3.5" aria-hidden />
       </button>

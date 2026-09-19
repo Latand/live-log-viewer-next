@@ -9,6 +9,7 @@ import { getLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import type { TaskSendResult } from "./taskApi";
+import { Z } from "@/components/layers";
 
 export interface TaskToast {
   id: number;
@@ -67,8 +68,8 @@ export function TaskToastHost() {
     <div
       className={
         isMobile
-          ? "z-50 flex shrink-0 flex-col gap-1.5 border-t border-border bg-canvas px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
-          : "pointer-events-none absolute inset-x-0 bottom-14 z-50 flex flex-col items-center gap-1.5 px-3"
+          ? `${Z.toast} flex shrink-0 flex-col gap-1.5 border-t border-border bg-canvas px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]`
+          : `pointer-events-none absolute inset-x-0 bottom-14 ${Z.toast} flex flex-col items-center gap-1.5 px-3`
       }
     >
       {toasts.map((toast) => (

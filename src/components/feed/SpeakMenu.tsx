@@ -5,10 +5,12 @@ import { createPortal } from "react-dom";
 
 import { Check, Loader2 } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useOverlayEscape } from "@/hooks/useOverlayEscape";
 import { useLocale } from "@/lib/i18n";
 import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
 
 import { subscribeTtsCache } from "./ttsSession";
+import { Z } from "@/components/layers";
 
 export type BackendId = "openai" | "elevenlabs" | "soniox";
 
@@ -165,23 +167,15 @@ export function SpeakAlert({
   const rootRef = useRef<HTMLDivElement>(null);
   const { style, onScreen } = useAnchoredBox(anchorRef, rootRef, ALERT_WIDTH);
 
+  useOverlayEscape(onDismiss);
   useEffect(() => {
     const away = (event: Event) => {
       const target = event.target as Node | null;
       if (rootRef.current?.contains(target ?? null) || anchorRef.current?.contains(target ?? null)) return;
       onDismiss();
     };
-    const key = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onDismiss();
-    };
     window.addEventListener("pointerdown", away);
-    window.addEventListener("keydown", key);
-    return () => {
-      window.removeEventListener("pointerdown", away);
-      window.removeEventListener("keydown", key);
-    };
+    return () => window.removeEventListener("pointerdown", away);
   }, [anchorRef, onDismiss]);
 
   if (typeof document === "undefined" || !onScreen) return null;
@@ -191,7 +185,7 @@ export function SpeakAlert({
       role="alert"
       data-tts-alert
       style={style}
-      className="fixed z-[80] w-56 max-w-[calc(100vw-16px)] break-all rounded-[10px] border border-border bg-card p-2 text-[11px] text-danger shadow-2"
+      className={`fixed ${Z.popover} w-56 max-w-[calc(100vw-16px)] break-all rounded-[10px] border border-border bg-card p-2 text-[11px] text-danger shadow-2`}
     >
       {children}
     </div>,
@@ -246,24 +240,17 @@ export function SpeakMenu({ anchorRef, info, option, chars, notice, freeReplay, 
   useEffect(() => subscribeTtsCache(() => setCacheTick((tick) => tick + 1)), []);
 
   /* Click-away and Escape both dismiss; a pointerdown on the trigger is left
-     alone so its own contextmenu handler can toggle the menu shut. */
+     alone so its own contextmenu handler can toggle the menu shut. Escape
+     closes the menu alone, never a modal it was opened in. */
+  useOverlayEscape(() => onClose(true));
   useEffect(() => {
     const away = (event: Event) => {
       const target = event.target as Node | null;
       if (rootRef.current?.contains(target ?? null) || anchorRef.current?.contains(target ?? null)) return;
       onClose(false);
     };
-    const key = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose(true);
-    };
     window.addEventListener("pointerdown", away);
-    window.addEventListener("keydown", key);
-    return () => {
-      window.removeEventListener("pointerdown", away);
-      window.removeEventListener("keydown", key);
-    };
+    return () => window.removeEventListener("pointerdown", away);
   }, [anchorRef, onClose]);
 
   /* Keyboard: the menu opens on the context-menu key (Shift+F10 / the Menu key
@@ -295,7 +282,7 @@ export function SpeakMenu({ anchorRef, info, option, chars, notice, freeReplay, 
       data-tts-menu
       aria-label={t("tts.menuTitle")}
       style={style}
-      className="fixed z-[80] max-h-[calc(100vh-16px)] w-[300px] max-w-[calc(100vw-16px)] overflow-y-auto rounded-[12px] border border-border bg-card p-1.5 text-left shadow-2 focus-visible:outline-none"
+      className={`fixed ${Z.popover} max-h-[calc(100vh-16px)] w-[300px] max-w-[calc(100vw-16px)] overflow-y-auto rounded-[12px] border border-border bg-card p-1.5 text-left shadow-2 focus-visible:outline-none`}
     >
       <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">{t("tts.menuTitle")}</div>
       {/* The honesty line the confirm dialog used to carry: what the next left

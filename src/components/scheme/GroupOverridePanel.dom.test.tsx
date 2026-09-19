@@ -9,6 +9,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { GroupsLayer } from "./nodes";
 import { GroupOverridePanel } from "./GroupOverridePanel";
 import type { SchemeGroup } from "./layout";
+import { Z } from "@/components/layers";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -73,9 +74,8 @@ test("the override panel opens in a foreground layer, not nested in a halo stack
   /* The panel must NOT live inside a [data-scheme-group] halo wrapper — that
      wrapper's positioning context would paint it beneath the scheme cards. */
   expect(panel.closest("[data-scheme-group]")).toBeNull();
-  /* It sits in a high-z foreground container so it paints above the cards. */
-  const foreground = panel.closest(".z-\\[45\\]") ?? panel.parentElement;
-  expect(foreground?.className ?? "").toContain("z-[45]");
+  /* It sits in a foreground container on the popover layer, so it paints above the cards. */
+  expect(panel.closest(`[class~="${Z.popover}"]`)).toBeTruthy();
 
   flushSync(() => root.unmount());
   host.remove();

@@ -10,6 +10,7 @@ import { X } from "./icons";
 import { AttachControls } from "./resources/AttachControls";
 import { bulkKillTargets, idleKillTargets, isStructuredHost, resourceCounts } from "./resources/hostSelection";
 import { activityDot, engineTintOf, fmtAge } from "./utils";
+import { Z } from "@/components/layers";
 
 const POLL_MS = 30_000;
 const INITIAL_POLL_DELAY_MS = 1_500;
@@ -400,7 +401,7 @@ export function CleanupPanel({
   const killAllCount = bulkKillTargets(sessions, tickedSeats).length;
 
   return (
-    <div className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0">
+    <div className={`fixed bottom-3 left-1/2 ${Z.modal} flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0`}>
       <header className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-[12.5px] font-bold">{t("resources.title")}</span>
         {sessions.length ? (

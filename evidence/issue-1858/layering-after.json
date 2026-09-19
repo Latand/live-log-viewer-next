@@ -1,0 +1,536 @@
+{
+  "generatedBy": "scripts/capture-layering.ts",
+  "head": "3b3b35cf416a0ffb0bb25013fdd28c35c1c0c13a",
+  "viewports": [
+    "1440x900",
+    "390x844"
+  ],
+  "passed": 18,
+  "failed": 0,
+  "results": [
+    {
+      "id": "mic-menu-orchestrator",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "opened the microphone's menu (contextmenu) on the orchestrator seat above the board"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 1010,
+          "y": 86,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "mic-menu-docked-conversation",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the microphone's menu (contextmenu) on the reader docked in its board card"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 317,
+          "y": 630,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "mic-menu-in-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "opened the microphone's menu (contextmenu) on the expanded conversation",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 904,
+          "y": 543,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true
+      }
+    },
+    {
+      "id": "mic-menu-keyboard-orchestrator",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "focused Dictate on the orchestrator seat above the board",
+        "pressed Shift+F10",
+        "pressed Tab once",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 1010,
+          "y": 86,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "keyboard": {
+          "afterOpen": "button[role=\"menuitemradio\"] \"Faster WhisperFree, fully local — audio \"",
+          "afterOpenInside": true,
+          "afterTab": "button[role=\"menuitemradio\"] \"ChatGPT VoiceCovered by your ChatGPT sub\"",
+          "afterTabInside": true,
+          "afterEscape": "button \"Dictate\"",
+          "returnedToDictate": true
+        }
+      }
+    },
+    {
+      "id": "mic-menu-keyboard-in-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "focused Dictate on the expanded conversation",
+        "pressed Shift+F10",
+        "pressed Tab once",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 904,
+          "y": 543,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "keyboard": {
+          "afterOpen": "button[role=\"menuitemradio\"] \"Faster WhisperFree, fully local — audio \"",
+          "afterOpenInside": true,
+          "afterTab": "button[role=\"menuitemradio\"] \"ChatGPT VoiceCovered by your ChatGPT sub\"",
+          "afterTabInside": true,
+          "afterEscape": "button \"Dictate\"",
+          "returnedToDictate": true
+        }
+      }
+    },
+    {
+      "id": "image-preview-from-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "clicked the picture",
+        "pressed Escape once to close the preview"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 1440,
+          "h": 900
+        },
+        "context": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "contextZ": "76",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "host": {
+          "overlay": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+          "rect": {
+            "x": 231,
+            "y": 386,
+            "w": 383,
+            "h": 240
+          },
+          "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+          "contextZ": "auto",
+          "points": 81,
+          "covered": 0,
+          "coverers": []
+        }
+      }
+    },
+    {
+      "id": "composer-hint-orchestrator",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "rested the pointer on \"Launch the agent\" on the orchestrator seat's composer"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 1250,
+          "y": 292,
+          "w": 98,
+          "h": 24
+        },
+        "context": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "composer-hint-in-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "rested the pointer on \"Launch the agent\" on the expanded conversation's composer"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 1144,
+          "y": 750,
+          "w": 98,
+          "h": 24
+        },
+        "context": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "menu-inside-accounts-dialog",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "opened the Claude accounts dialog from the limits footer"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.bottom-3.left-1/2.z-[66][role=\"dialog\"][aria-label=\"Claude accounts\"]",
+        "rect": {
+          "x": 255,
+          "y": 423,
+          "w": 400,
+          "h": 299
+        },
+        "context": "div.fixed.bottom-3.left-1/2.z-[66][role=\"dialog\"][aria-label=\"Claude accounts\"]",
+        "contextZ": "66",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "note": "The accounts dialog holds no control that opens a menu at this head (no aria-haspopup menu, listbox or true inside it); the reading is the dialog itself over the board."
+    },
+    {
+      "id": "mic-menu-orchestrator",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation",
+        "opened the microphone's menu (contextmenu) on the orchestrator's conversation"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 8,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "mic-menu-docked-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped a task's conversation from the board",
+        "opened the microphone's menu (contextmenu) on the task's conversation"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 8,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "mic-menu-in-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "opened the microphone's menu (contextmenu) on the full-screen conversation",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 8,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true
+      }
+    },
+    {
+      "id": "mic-menu-keyboard-orchestrator",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation",
+        "focused Dictate on the orchestrator's conversation",
+        "pressed Shift+F10",
+        "pressed Tab once",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 8,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "keyboard": {
+          "afterOpen": "button[role=\"menuitemradio\"] \"Faster WhisperFree, fully local — audio \"",
+          "afterOpenInside": true,
+          "afterTab": "button[role=\"menuitemradio\"] \"ChatGPT VoiceCovered by your ChatGPT sub\"",
+          "afterTabInside": true,
+          "afterEscape": "button \"Dictate\"",
+          "returnedToDictate": true
+        }
+      }
+    },
+    {
+      "id": "mic-menu-keyboard-in-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "focused Dictate on the full-screen conversation",
+        "pressed Shift+F10",
+        "pressed Tab once",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 8,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "keyboard": {
+          "afterOpen": "button[role=\"menuitemradio\"] \"Faster WhisperFree, fully local — audio \"",
+          "afterOpenInside": true,
+          "afterTab": "button[role=\"menuitemradio\"] \"ChatGPT VoiceCovered by your ChatGPT sub\"",
+          "afterTabInside": true,
+          "afterEscape": "button \"Dictate\"",
+          "returnedToDictate": true
+        }
+      }
+    },
+    {
+      "id": "image-preview-from-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "clicked the picture",
+        "pressed Escape once to close the preview"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 390,
+          "h": 844
+        },
+        "context": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "contextZ": "76",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "host": {
+          "overlay": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+          "rect": {
+            "x": 49,
+            "y": 460,
+            "w": 328,
+            "h": 206
+          },
+          "context": "html.h-full.antialiased",
+          "contextZ": "auto",
+          "points": 81,
+          "covered": 0,
+          "coverers": []
+        }
+      }
+    },
+    {
+      "id": "composer-hint-orchestrator",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation",
+        "focused \"Add files or images\" on the orchestrator's conversation"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 92,
+          "y": 760,
+          "w": 108,
+          "h": 24
+        },
+        "context": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "composer-hint-in-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped a task's conversation from the board",
+        "focused \"Add files or images\" on the task's conversation"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 92,
+          "y": 760,
+          "w": 108,
+          "h": 24
+        },
+        "context": "span.pointer-events-none.fixed.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "menu-inside-accounts-dialog",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "opened Accounts & limits from More actions",
+        "opened the accounts screen's own More actions menu"
+      ],
+      "coverage": {
+        "overlay": "div.flex.flex-col[role=\"menu\"][aria-label=\"kanban\"][data-layering-probe]",
+        "rect": {
+          "x": 0,
+          "y": 290,
+          "w": 390,
+          "h": 544
+        },
+        "context": "div.fixed.inset-0.z-[60].flex[role=\"presentation\"][data-mobile2-scrim=\"true\"]",
+        "contextZ": "60",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "note": "The phone's accounts screen is a full screen; the menu read is the one its header opens (kanban)."
+    }
+  ]
+}

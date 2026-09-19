@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useRuntime } from "@/hooks/useRuntime";
 import type { RuntimeSnapshot, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import { Z } from "@/components/layers";
 
 /* The viewer-deploy status is internal operator information (issue #177 item 6).
    It stays out of the app interface by default and never appears on the phone.
@@ -48,7 +49,7 @@ export function DeploymentStatusPill() {
        `pointer-events-none` guards taps through it, and the safe-area inset lifts
        it clear of the home bar. */
     <div
-      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 z-40 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-raised px-3 py-1 text-[11px] font-semibold shadow-2 backdrop-blur ${tone}`}
+      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 ${Z.toast} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-raised px-3 py-1 text-[11px] font-semibold shadow-2 backdrop-blur ${tone}`}
       role="status"
       title={deployment.error ?? `Revision ${deployment.revision.slice(0, 12)}`}
     >

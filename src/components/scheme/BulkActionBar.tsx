@@ -15,6 +15,7 @@ import { canBulkFlow, canBulkInterrupt, canBulkKill, runBulk, withPresenceGuard,
 import type { SchemeNode } from "./layout";
 import { findFreeSlot } from "./findFreeSlot";
 import { TASK_W } from "./taskGeometry";
+import { Z } from "@/components/layers";
 
 type ActionId = "message" | "interrupt" | "kill" | "remove" | "flow";
 
@@ -248,7 +249,7 @@ export const BulkActionBar = memo(function BulkActionBar({
   return (
     <div
       data-scheme-ui
-      className="absolute bottom-3 left-1/2 z-40 flex w-[640px] max-w-[94%] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card/95 p-2.5 shadow-2"
+      className={`absolute bottom-3 left-1/2 ${Z.dock} flex w-[640px] max-w-[94%] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card/95 p-2.5 shadow-2`}
     >
       {flowOpen ? (
         <BulkFlowPopover

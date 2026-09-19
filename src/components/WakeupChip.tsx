@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { PendingWakeup } from "@/lib/types";
 
 import { AlarmClock } from "./icons";
 import { fmtWakeClock, fmtWakeMagnitude } from "./wakeupFormat";
+import { TooltipBubble } from "@/components/TooltipBubble";
 
 /** React `key` for a {@link WakeupChip}. Keying by the fire time remounts the
     chip whenever the wakeup changes (a fresh schedule or a reschedule), so its
@@ -49,6 +50,7 @@ export function WakeupChip({
   const { locale, t } = useLocale();
   const [now, setNow] = useState(() => Date.now());
   const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLSpanElement>(null);
   const fireAt = wakeup?.fireAt ?? 0;
   const pending = Boolean(wakeup) && fireAt > now;
   useEffect(() => {
@@ -80,7 +82,7 @@ export function WakeupChip({
   }
 
   return (
-    <span className={`relative inline-flex ${shrink} ${className ?? ""}`}>
+    <span ref={anchorRef} className={`relative inline-flex ${shrink} ${className ?? ""}`}>
       <button
         type="button"
         data-wakeup
@@ -105,9 +107,14 @@ export function WakeupChip({
         {face}
       </button>
       {open ? (
-        <span role="tooltip" className="absolute left-0 top-full z-20 mt-1 max-w-[240px] whitespace-normal rounded-lg border border-border bg-card px-2.5 py-1.5 text-[11px] font-normal leading-snug text-primary shadow-1">
+        <TooltipBubble
+          anchorRef={anchorRef}
+          side="bottom"
+          align="left"
+          className="max-w-[240px] whitespace-normal rounded-lg border border-border bg-card px-2.5 py-1.5 text-[11px] font-normal leading-snug text-primary shadow-1"
+        >
           {label}
-        </span>
+        </TooltipBubble>
       ) : null}
     </span>
   );

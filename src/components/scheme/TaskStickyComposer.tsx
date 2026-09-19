@@ -11,6 +11,7 @@ import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { TASK_W } from "./taskGeometry";
+import { Z } from "@/components/layers";
 
 /**
  * The on-board inline composer the «task» tool and empty-canvas double-click
@@ -77,7 +78,7 @@ export function TaskStickyComposer({
     <div
       data-scheme-task="new"
       data-chip-keepout
-      className="absolute z-30"
+      className={`absolute ${Z.lifted}`}
       style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: TASK_W }}
     >
       <form

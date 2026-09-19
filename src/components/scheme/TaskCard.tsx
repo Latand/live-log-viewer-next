@@ -18,6 +18,7 @@ import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
 import { assignmentAgentState, assignmentOpenable } from "./assignmentState";
 import { TASK_W, displayedTaskHeight, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+import { Z } from "@/components/layers";
 
 const TITLE_CLAMP_CLASS = "line-clamp-2";
 const PREVIEW_CLAMP_CLASS = "line-clamp-3";
@@ -522,7 +523,7 @@ export const TaskCard = memo(function TaskCard({
   return (
     <div
       data-scheme-task={task.id}
-      className={`group absolute pb-9 ${lifted ? "z-30" : "z-[4]"}`}
+      className={`group absolute pb-9 ${lifted ? Z.lifted : "z-[4]"}`}
       style={{
         transform: `translate(${pos.x}px, ${pos.y}px)${task.displayScale && task.displayScale !== 1 ? ` scale(${task.displayScale})` : ""}`,
         transformOrigin: "top left",

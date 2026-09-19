@@ -50,6 +50,7 @@ import {
   type SeatBadgeTone,
   type SeatCardView,
 } from "./orchestratorRowState";
+import { Z } from "@/components/layers";
 
 const BADGE_TONE: Record<SeatBadgeTone, string> = {
   success: "bg-success-soft text-success",
@@ -491,7 +492,7 @@ function SeatDraftSheet({
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex flex-col bg-canvas pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+      className={`fixed inset-0 ${Z.sheet} flex flex-col bg-canvas pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]`}
       /* The keyboard's overlap with this full-height surface (#983). Inline so
          it wins over the safe-area padding above: with the keyboard up, the
          home indicator is behind it and the only inset that matters is this. */

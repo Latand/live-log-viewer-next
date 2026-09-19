@@ -11,6 +11,7 @@ import { useLocale } from "@/lib/i18n";
 import { snippetSegments } from "@/lib/search/snippet";
 
 import { transcriptSearchRowKey, useTranscriptSearch, type TranscriptSearchRow } from "./useTranscriptSearch";
+import { Z } from "@/components/layers";
 
 interface Props {
   /** Phone layout: the dialog takes the whole viewport and every control is a
@@ -186,7 +187,7 @@ export function GlobalSearch({ mobile, onClose, onOpen }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex bg-primary/28"
+      className={`fixed inset-0 ${Z.modal} flex bg-primary/28`}
       onMouseDown={onClose}
       data-global-search-backdrop
     >

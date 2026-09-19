@@ -10,6 +10,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { SchemeLayout, SchemeRect } from "./layout";
 import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
 import type { WorkerStack } from "./workerCollapse";
+import { Z } from "@/components/layers";
 
 export interface Camera {
   x: number;
@@ -121,7 +122,7 @@ export function Minimap({
     <div
       ref={ref}
       data-scheme-ui
-      className="absolute bottom-3 right-3 z-40 cursor-pointer overflow-hidden rounded-[10px] border border-border bg-card/95 shadow-1"
+      className={`absolute bottom-3 right-3 ${Z.dock} cursor-pointer overflow-hidden rounded-[10px] border border-border bg-card/95 shadow-1`}
       style={{ width: MAP_W, height: MAP_H }}
       title={t("minimap.title")}
       onPointerDown={(event) => {

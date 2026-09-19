@@ -1,0 +1,265 @@
+{
+  "generatedBy": "scripts/capture-layering.ts",
+  "head": "885c502dc3de6ea0e5281d96412b142a2125ebff",
+  "viewports": [
+    "1440x900",
+    "390x844"
+  ],
+  "passed": 4,
+  "failed": 4,
+  "results": [
+    {
+      "id": "mic-menu-in-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "opened the microphone's menu (contextmenu) on the expanded conversation",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 904,
+          "y": 543,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": false
+      }
+    },
+    {
+      "id": "image-preview-from-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "clicked the picture",
+        "pressed Escape once to close the preview"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 1440,
+          "h": 900
+        },
+        "context": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "contextZ": "76",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": false,
+        "host": null
+      }
+    },
+    {
+      "id": "composer-hint-orchestrator",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "rested the pointer on \"Launch the agent\" on the orchestrator seat's composer"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 1250,
+          "y": 293,
+          "w": 98,
+          "h": 23
+        },
+        "context": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 81,
+        "coverers": [
+          {
+            "element": "div.flex.min-w-0.flex-wrap.items-center",
+            "context": "section.seat[data-kanban-seat=\"dir-e1b6b00e76f89f6515515f44064970ef\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          },
+          {
+            "element": "div.flex.shrink-0.flex-col.gap-1[data-agent-control-strip=\"true\"][data-strip-surface=\"resume\"][data-strip-layout=\"full\"]",
+            "context": "section.seat[data-kanban-seat=\"dir-e1b6b00e76f89f6515515f44064970ef\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "composer-hint-in-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "rested the pointer on \"Launch the agent\" on the expanded conversation's composer"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 1250,
+          "y": 57,
+          "w": 98,
+          "h": 23
+        },
+        "context": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 81,
+        "coverers": [
+          {
+            "element": "div.conv-head",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/h\"][data-kanban-reader=\"$CAPTURE/h\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.ch-meta",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/h\"][data-kanban-reader=\"$CAPTURE/h\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/h\"][data-kanban-reader=\"$CAPTURE/h\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/h\"][data-kanban-reader=\"$CAPTURE/h\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.reader-full[data-reader-full=\"$CAPTURE/h\"]",
+            "context": "div.reader-full[data-reader-full=\"$CAPTURE/h\"]",
+            "contextZ": "64"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mic-menu-in-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "opened the microphone's menu (contextmenu) on the full-screen conversation",
+        "pressed Escape once to close the microphone's menu"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "rect": {
+          "x": 8,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.fixed.z-[72].w-[300px].overflow-y-auto[role=\"menu\"][aria-label=\"Transcription method\"][data-mic-backend-menu=\"true\"]",
+        "contextZ": "72",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true
+      }
+    },
+    {
+      "id": "image-preview-from-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "clicked the picture",
+        "pressed Escape once to close the preview"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 390,
+          "h": 844
+        },
+        "context": "div.fixed.inset-0.z-[76].flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "contextZ": "76",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "keptOpen": true,
+        "host": {
+          "overlay": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+          "rect": {
+            "x": 49,
+            "y": 460,
+            "w": 328,
+            "h": 206
+          },
+          "context": "html.h-full.antialiased",
+          "contextZ": "auto",
+          "points": 81,
+          "covered": 0,
+          "coverers": []
+        }
+      }
+    },
+    {
+      "id": "composer-hint-orchestrator",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation",
+        "focused \"Add files or images\" on the orchestrator's conversation"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 92,
+          "y": 760,
+          "w": 108,
+          "h": 24
+        },
+        "context": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    },
+    {
+      "id": "composer-hint-in-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped a task's conversation from the board",
+        "focused \"Add files or images\" on the task's conversation"
+      ],
+      "coverage": {
+        "overlay": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "rect": {
+          "x": 92,
+          "y": 760,
+          "w": 108,
+          "h": 24
+        },
+        "context": "span.pointer-events-none.absolute.z-[88].whitespace-nowrap[role=\"tooltip\"][data-layering-probe]",
+        "contextZ": "88",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      }
+    }
+  ]
+}

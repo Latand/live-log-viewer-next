@@ -10,6 +10,7 @@ import type { SchemeRect } from "./layout";
 import type { SubagentBadgeAnchorRegistry } from "./subagentBadgeAnchors";
 import { layoutBadges } from "./subagentBadgeLayout";
 import { subagentsOf } from "./subagentBadgeModel";
+import { above, Z } from "@/components/layers";
 
 export interface SubagentBadgesProps {
   conversationId: string;
@@ -123,8 +124,8 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
               data-scheme-ui
               aria-label={foldLabel(child.title)}
               title={foldLabel(child.title)}
-              className="pointer-events-auto absolute z-[71] inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-[11px] text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55"
-              style={{ left: position.x - cardRect.x + 202, top: position.y - cardRect.y + 5 }}
+              className="pointer-events-auto absolute inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-[11px] text-muted shadow-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55"
+              style={{ left: position.x - cardRect.x + 202, top: position.y - cardRect.y + 5, zIndex: above("popover") }}
               onClick={() => onFold(child.id, child.path)}
             >
               <span aria-hidden>↧</span>
@@ -148,7 +149,7 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
             aria-label={child.title}
             title={tooltip}
             className={`pointer-events-auto absolute flex max-w-[220px] items-center overflow-hidden rounded-full border border-card bg-card text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 ${
-              expanded ? "z-[70] w-[220px]" : "z-[6] w-[30px]"
+              expanded ? `${Z.popover} w-[220px]` : "z-[6] w-[30px]"
             } ${dimmed ? "opacity-45 grayscale" : ""} ${unavailable ? "cursor-default" : "cursor-pointer hover:shadow-2"}`}
             style={{
               ...relativeStyle,

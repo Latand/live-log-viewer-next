@@ -9,6 +9,7 @@ import type { FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/components/utils";
 import { taskTitle } from "./taskModel";
 import type { TaskWorkflowProjection } from "./taskWorkflowModel";
+import { Z } from "@/components/layers";
 
 const PAGE = 30;
 
@@ -34,7 +35,7 @@ export const TaskWorkflowPanel = memo(function TaskWorkflowPanel({ model, onOpen
     `${row.file?.title ?? ""} ${row.stageId ?? ""} ${row.role} ${row.state}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [rows, query]);
   const lastPage = Math.max(0, Math.ceil(matching.length / PAGE) - 1), currentPage = Math.min(page, lastPage);
   const choose = (id: string | null) => { setSelected(id); setQuery(""); setPage(0); };
-  return <aside data-task-workflow-panel className="absolute bottom-3 right-3 top-14 z-50 flex w-[420px] max-w-[calc(100%-24px)] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2"
+  return <aside data-task-workflow-panel className={`absolute bottom-3 right-3 top-14 ${Z.sheet} flex w-[420px] max-w-[calc(100%-24px)] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2`}
     aria-label={t("taskHistory.title")} onPointerDown={event => event.stopPropagation()} onWheel={event => event.stopPropagation()}>
     <header className="flex items-center justify-between border-b border-border px-4 py-3">
       <strong>{t("taskHistory.title")}</strong>

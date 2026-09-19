@@ -5,7 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { X } from "@/components/icons";
+import { useOverlayEscape } from "@/hooks/useOverlayEscape";
 import { useLocale } from "@/lib/i18n";
+import { Z } from "@/components/layers";
 
 interface Props {
   src: string;
@@ -29,18 +31,15 @@ export function Lightbox({ src, alt, caption, onClose }: Props) {
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
 
+  useOverlayEscape(onClose);
+
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
     };
-  }, [onClose]);
+  }, []);
 
   const clamp = (value: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
   const zoomBy = (factor: number, cx = 0, cy = 0) => {
@@ -63,7 +62,7 @@ export function Lightbox({ src, alt, caption, onClose }: Props) {
      overlay would fill the pane, not the screen. Portal to <body> escapes it. */
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-sm"
+      className={`fixed inset-0 ${Z.overlay} flex flex-col bg-black/85 backdrop-blur-sm`}
       role="dialog"
       aria-modal="true"
       aria-label={alt}

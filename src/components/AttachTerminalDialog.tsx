@@ -8,6 +8,7 @@ import { useLocale, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { AttachCommand } from "@/lib/agent/attachCommand";
 import type { AttachMode } from "./agentCapabilities";
+import { Z } from "@/components/layers";
 
 async function copyText(value: string): Promise<boolean> {
   try {
@@ -100,7 +101,7 @@ export function AttachTerminalDialogView({
   ) : null;
   return (
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-3"
+      className={`fixed inset-0 ${Z.overlay} flex items-center justify-center bg-black/40 p-3`}
       role="presentation"
       onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
     >

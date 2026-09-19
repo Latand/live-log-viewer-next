@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
 import { Check, Copy, Loader2, Mic, Square, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useOverlayEscape } from "@/hooks/useOverlayEscape";
 import { fmtElapsed, METER_HEIGHT, METER_WIDTH, prewarmLiveToken, type UseDictationResult } from "@/hooks/useDictation";
 import { micVisual } from "@/lib/dictationTimer";
 import { translate, useLocale } from "@/lib/i18n";
+
+import { Z } from "./layers";
 
 export interface MicButtonViewProps extends UseDictationResult {
   onText: (text: string) => void;
@@ -28,12 +32,35 @@ interface BackendInfo {
   options: { id: BackendId; available: boolean; keyPath: string }[];
 }
 
+const MENU_WIDTH = 300;
+const MENU_GAP = 6;
+const EDGE = 8;
+
+type MenuPlacement = { left: number; top?: number; bottom?: number; maxHeight: number };
+
+/** Above the button when the menu fits there, else below it; always inside the window. */
+export function backendMenuPlacement(anchor: { top: number; bottom: number; right: number }, menuHeight: number, viewport: { width: number; height: number }): MenuPlacement {
+  const left = Math.max(EDGE, Math.min(anchor.right - MENU_WIDTH, viewport.width - MENU_WIDTH - EDGE));
+  const spaceAbove = anchor.top - MENU_GAP - EDGE;
+  const spaceBelow = viewport.height - anchor.bottom - MENU_GAP - EDGE;
+  if (menuHeight <= spaceAbove || spaceAbove >= spaceBelow) {
+    return { left, bottom: viewport.height - anchor.top + MENU_GAP, maxHeight: Math.max(0, spaceAbove) };
+  }
+  return { left, top: anchor.bottom + MENU_GAP, maxHeight: Math.max(0, spaceBelow) };
+}
+
 /**
  * Right-click menu of the mic button: pick which transcription engine handles
  * dictation. Options carry a one-line description; an option whose credential
  * is missing opens a key panel with the exact path to drop it into, copyable.
+ *
+ * Portalled to the document at the popover layer and placed against the
+ * window from the button's box: a composer lives inside panes that clip their
+ * content (the orchestrator seat, a reader in a card) and inside modals, and
+ * a menu left in place there was cut off by the composer row and drawn under
+ * the chips beside it (#1858).
  */
-function BackendMenu({ onClose }: { onClose: () => void }) {
+function BackendMenu({ anchorRef, onClose }: { anchorRef: RefObject<HTMLElement | null>; onClose: () => void }) {
   const { locale, t } = useLocale();
   const [info, setInfo] = useState<BackendInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +68,26 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState<BackendId | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState<MenuPlacement | null>(null);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      setPlacement(backendMenuPlacement(rect, rootRef.current?.scrollHeight ?? 0, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    if (rootRef.current) observer?.observe(rootRef.current);
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [anchorRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,20 +104,53 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
     };
   }, [locale]);
 
-  /* Click-away and Escape both dismiss; the menu never outlives the composer. */
+  /* THE MENU TAKES FOCUS. A portal leaves the tab order behind at the Dictate
+     button, so a menu opened from the keyboard (Shift+F10, the context-menu
+     key) was out of Tab's reach at the end of the document. The menu itself
+     holds focus while its options load, then hands it to the selected option;
+     Tab and the arrows cycle inside it, and closing from the keyboard or with
+     a pick gives focus back to the button. */
+  const optionsReady = info !== null;
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const target = root.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]:not([disabled])')
+      ?? root.querySelector<HTMLElement>("button:not([disabled])")
+      ?? root;
+    target.focus();
+  }, [optionsReady, keyFor]);
+
+  const close = () => {
+    const root = rootRef.current;
+    const hadFocus = Boolean(root && root.contains(document.activeElement));
+    onClose();
+    if (hadFocus) anchorRef.current?.focus();
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.key === "Tab" ? (event.shiftKey ? -1 : 1)
+      : event.key === "ArrowDown" ? 1
+      : event.key === "ArrowUp" ? -1
+      : 0;
+    if (step === 0) return;
+    event.preventDefault();
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not([disabled])"));
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next = at === -1 ? (step > 0 ? 0 : items.length - 1) : (at + step + items.length) % items.length;
+    items[next].focus();
+  };
+
+  /* Click-away and Escape both dismiss; the menu never outlives the composer,
+     and its Escape never reaches a modal it was opened in. A click away leaves
+     focus wherever that click puts it. */
+  useOverlayEscape(close);
   useEffect(() => {
     const away = (event: PointerEvent) => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) onClose();
     };
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
     window.addEventListener("pointerdown", away);
-    window.addEventListener("keydown", key);
-    return () => {
-      window.removeEventListener("pointerdown", away);
-      window.removeEventListener("keydown", key);
-    };
+    return () => window.removeEventListener("pointerdown", away);
   }, [onClose]);
 
   const pick = async (id: BackendId, available: boolean) => {
@@ -94,7 +174,7 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
         return;
       }
       setInfo(json);
-      onClose();
+      close();
     } catch {
       setError(t("common.serverUnavailable"));
     } finally {
@@ -104,12 +184,19 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
 
   const keyOption = keyFor && info ? info.options.find((option) => option.id === keyFor) : null;
 
-  return (
+  if (typeof document === "undefined") return null;
+  return createPortal(
     <div
       ref={rootRef}
       role="menu"
       aria-label={t("mic.menuTitle")}
-      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[300px] rounded-[12px] border border-border bg-card p-1.5 shadow-2"
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+      data-mic-backend-menu
+      style={placement
+        ? { left: placement.left, top: placement.top, bottom: placement.bottom, maxHeight: placement.maxHeight }
+        : { left: -9999, top: 0, visibility: "hidden" }}
+      className={`fixed ${Z.popover} w-[300px] overflow-y-auto outline-none rounded-[12px] border border-border bg-card p-1.5 shadow-2`}
     >
       {keyOption ? (
         <div className="flex flex-col gap-2 p-2">
@@ -197,7 +284,8 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
           {error ? <div className="px-2 py-1 text-[10.5px] font-semibold text-danger">{error}</div> : null}
         </>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -225,6 +313,7 @@ export function MicButtonView({
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [menuOpen, setMenuOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const visual = micVisual({ phase, elapsed, maxSeconds, capStopped });
   const handleMain = () => {
     if (busy) return;
@@ -303,6 +392,7 @@ export function MicButtonView({
     <span className="relative inline-flex shrink-0">
       {srRegion}
       <button
+        ref={buttonRef}
         type="button"
         aria-label={phase === "busy" ? t("mic.recognizing") : phase === "starting" ? t("mic.connecting") : t("mic.dictate")}
         title={phase === "busy" ? t("mic.recognizing") : phase === "starting" ? t("mic.connecting") : t("mic.dictateHint")}
@@ -336,7 +426,7 @@ export function MicButtonView({
           <Mic className="h-4 w-4" aria-hidden />
         )}
       </button>
-      {menuOpen ? <BackendMenu onClose={() => setMenuOpen(false)} /> : null}
+      {menuOpen ? <BackendMenu anchorRef={buttonRef} onClose={() => setMenuOpen(false)} /> : null}
     </span>
   );
 }

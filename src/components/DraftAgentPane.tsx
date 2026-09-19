@@ -50,6 +50,7 @@ import {
 import { ReasoningControls } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
 import { draftWorkingDirectory } from "./projectModel";
+import { Z } from "@/components/layers";
 
 type Engine = "claude" | "codex";
 
@@ -837,7 +838,7 @@ export function DraftAgentPane({
 
       {/* The picker's popup hangs out of this strip, so the strip cannot clip
           its own overflow — the pane below it scrolls, the strip does not. */}
-      <div className="relative z-20 flex shrink-0 items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
+      <div className={`relative ${Z.lifted} flex shrink-0 items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5`}>
         <span className="shrink-0 text-[10px] font-semibold text-muted">{t("draft.directory")}</span>
         <DirectoryPicker
           id={dirPickerId}

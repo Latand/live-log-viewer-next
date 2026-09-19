@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useLocale } from "@/lib/i18n";
+import { Z } from "@/components/layers";
 
 interface StagingIdentity {
   staging: boolean;
@@ -29,7 +30,7 @@ export function StagingBadge() {
   }, []);
   if (!identity?.staging) return null;
   return (
-    <div className="pointer-events-none fixed left-1/2 top-1.5 z-40 -translate-x-1/2">
+    <div className={`pointer-events-none fixed left-1/2 top-1.5 ${Z.sticky} -translate-x-1/2`}>
       <Badge tone="warning" data-staging-badge title={t("staging.badgeTitle")} className="shadow-1 backdrop-blur">
         <span className="h-2 w-2 rounded-full bg-warning" aria-hidden />
         <span>{t("staging.badge")}</span>

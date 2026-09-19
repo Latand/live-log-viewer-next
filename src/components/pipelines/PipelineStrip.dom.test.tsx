@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
+import { LAYER } from "@/components/layers";
 
 const dom = new Window({ url: "http://localhost" });
 Object.assign(globalThis, {
@@ -89,11 +90,11 @@ test("planned stage configuration opens on demand and Escape restores the compac
 });
 
 test("the stage configuration editor portals above the phone's bottom sheets (#507 review F3)", async () => {
-  /* The phone's sheets (`MobileSheet`) are fixed z-[60]; the dock sheet that
-     first exposed this sat at z-[70] and is retired (mobile v2 lane 10). The
-     configuration editor mounts through the AnchoredVerdict body portal, so
-     its portal layer must sit ABOVE any of them — a layer painted under a
-     sheet's backdrop was invisible and unclickable at 390px. */
+  /* The phone's sheets (`MobileSheet`) sit on the `sheet` layer; the dock
+     sheet that first exposed this sat at z-[70] and is retired (mobile v2
+     lane 10). The configuration editor mounts through the AnchoredVerdict body
+     portal, so its portal layer must sit ABOVE every sheet and modal — a layer
+     painted under a sheet's backdrop was invisible and unclickable at 390px. */
   const element = dom.document.createElement("div");
   dom.document.body.append(element);
   const host = element as unknown as HTMLElement;
@@ -110,7 +111,8 @@ test("the stage configuration editor portals above the phone's bottom sheets (#5
   const portal = dialog!.parentElement as HTMLElement;
   const z = /z-\[(\d+)\]/.exec(portal.className)?.[1];
   expect(z).toBeTruthy();
-  expect(Number(z)).toBeGreaterThan(70);
+  expect(Number(z)).toBe(LAYER.overlay);
+  expect(Number(z)).toBeGreaterThan(Math.max(LAYER.sheet, LAYER.modal, 70));
 });
 
 test("desktop history opens both durable bindings from one logical review round (#353)", async () => {

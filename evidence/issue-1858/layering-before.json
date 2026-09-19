@@ -1,0 +1,549 @@
+{
+  "generatedBy": "scripts/capture-layering.ts",
+  "head": "ee1cc3cddd1513b8e9a3dee9a028bfd1e4d38fbe",
+  "viewports": [
+    "1440x900",
+    "390x844"
+  ],
+  "passed": 3,
+  "failed": 7,
+  "results": [
+    {
+      "id": "mic-menu-orchestrator",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "opened the microphone's menu (contextmenu) on the orchestrator seat above the board"
+      ],
+      "coverage": {
+        "overlay": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "rect": {
+          "x": 1010,
+          "y": 89,
+          "w": 300,
+          "h": 230
+        },
+        "context": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "contextZ": "40",
+        "points": 81,
+        "covered": 81,
+        "coverers": [
+          {
+            "element": "input[aria-label=\"Find a task\"][data-kanban-search]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.kb-page",
+            "context": "div.kb-page",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.min-w-0.items-center.gap-x-2[data-orchestrator-identity=\"true\"]",
+            "context": "div.incumbent-host.incumbent-inline.flex.min-w-0[data-orchestrator-incumbent=\"true\"][aria-label=\"The orchestrator holding this project's \"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "header.seat-head",
+            "context": "section.seat[data-kanban-seat=\"dir-3f79d8a5f609e7d6e246c83e28c64d06\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          },
+          {
+            "element": "p.shrink-0.border-b.border-border.bg-sunken[role=\"status\"]",
+            "context": "section.seat[data-kanban-seat=\"dir-3f79d8a5f609e7d6e246c83e28c64d06\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          },
+          {
+            "element": "div.my-2.ml-9.min-w-0",
+            "context": "section.seat[data-kanban-seat=\"dir-3f79d8a5f609e7d6e246c83e28c64d06\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          },
+          {
+            "element": "div.flex.min-w-0.flex-wrap.items-center",
+            "context": "section.seat[data-kanban-seat=\"dir-3f79d8a5f609e7d6e246c83e28c64d06\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          },
+          {
+            "element": "div.flex.shrink-0.flex-col.gap-1[data-agent-control-strip=\"true\"][data-strip-surface=\"resume\"][data-strip-layout=\"full\"]",
+            "context": "section.seat[data-kanban-seat=\"dir-3f79d8a5f609e7d6e246c83e28c64d06\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          },
+          {
+            "element": "span.max-w-[72px].truncate[data-seat-tick-face=\"true\"]",
+            "context": "div.incumbent-host.incumbent-inline.flex.min-w-0[data-orchestrator-incumbent=\"true\"][aria-label=\"The orchestrator holding this project's \"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.inline-flex.h-6.shrink-0.items-center[data-seat-tick-chip=\"unknown\"][aria-label=\"Seat tick settings. Tick: every 60 min ·\"]",
+            "context": "div.incumbent-host.incumbent-inline.flex.min-w-0[data-orchestrator-incumbent=\"true\"][aria-label=\"The orchestrator holding this project's \"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "header.bar",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.inline-flex.h-6.shrink-0.items-center[data-orchestrator-rotate=\"true\"]",
+            "context": "div.incumbent-host.incumbent-inline.flex.min-w-0[data-orchestrator-incumbent=\"true\"][aria-label=\"The orchestrator holding this project's \"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "svg",
+            "context": "section.seat[data-kanban-seat=\"dir-3f79d8a5f609e7d6e246c83e28c64d06\"][data-collapsed=\"0\"]",
+            "contextZ": "3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mic-menu-docked-conversation",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the microphone's menu (contextmenu) on the reader docked in its board card"
+      ],
+      "coverage": {
+        "overlay": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "rect": {
+          "x": 317,
+          "y": 633,
+          "w": 300,
+          "h": 230
+        },
+        "context": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "contextZ": "40",
+        "points": 81,
+        "covered": 72,
+        "coverers": [
+          {
+            "element": "div.feed-cv[data-feed-key=\"row:3:1\"][data-feed-kind=\"image\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.px-3.pb-3.text-body[data-feed-state=\"items\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.shrink-0.items-center.justify-center[data-turn-status=\"running\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.shrink-0.flex-col.gap-1[data-agent-control-strip=\"true\"][data-strip-surface=\"resume\"][data-strip-layout=\"narrow\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "span.truncate",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.mt-1.block.text-[12px].text-muted",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.min-w-0.flex-wrap.items-center",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.my-2.ml-9.min-w-0",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.inline-flex.shrink-0.items-center.justify-center[aria-label=\"Re-check\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "span.h-1.5.w-1.5.animate-bounce.rounded-full",
+            "context": "span.h-1.5.w-1.5.animate-bounce.rounded-full",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.inline-flex.shrink-0.items-center.justify-center[aria-label=\"More actions\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "span.min-w-0.truncate",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "span.tabular-nums[role=\"timer\"][aria-label=\"elapsed work time\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mic-menu-in-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "opened the microphone's menu (contextmenu) on the expanded conversation"
+      ],
+      "coverage": {
+        "overlay": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "rect": {
+          "x": 904,
+          "y": 546,
+          "w": 300,
+          "h": 230
+        },
+        "context": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "contextZ": "40",
+        "points": 81,
+        "covered": 72,
+        "coverers": [
+          {
+            "element": "div.my-2.ml-9.min-w-0",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.px-3.pb-3.text-body[data-feed-state=\"items\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.shrink-0.items-center.justify-center[data-turn-status=\"running\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.shrink-0.flex-col.gap-1[data-agent-control-strip=\"true\"][data-strip-surface=\"resume\"][data-strip-layout=\"full\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.min-w-0.flex-wrap.items-center",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          }
+        ]
+      }
+    },
+    {
+      "id": "image-preview-from-expanded-conversation",
+      "viewport": "1440x900",
+      "ok": false,
+      "steps": [
+        "clicked the orchestrator's tile on its board card",
+        "opened the reader as a full pane (the expanded conversation modal)",
+        "clicked the picture",
+        "the preview's Close button could not be clicked: click: Timeout 4000ms exceeded."
+      ],
+      "coverage": {
+        "overlay": "div.fixed.inset-0.z-50.flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 1440,
+          "h": 900
+        },
+        "context": "div.fixed.inset-0.z-50.flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "contextZ": "50",
+        "points": 81,
+        "covered": 81,
+        "coverers": [
+          {
+            "element": "div.reader-full[data-reader-full=\"$CAPTURE/home/.cla\"]",
+            "context": "div.reader-full[data-reader-full=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "64"
+          },
+          {
+            "element": "div.px-3.pb-3.text-body[data-feed-state=\"items\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.min-h-0.flex-1.overflow-y-auto.py-3[data-log-feed-scroller=\"true\"][data-tail-lines-start=\"0\"][data-tail-line-count=\"4\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "form.flex.shrink-0.flex-col.gap-1.5[aria-label=\"Launch an agent with a prompt\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.contents[data-tts-body=\"true\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.mb-0.5.flex.min-h-6.items-center",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.group/msg.my-3.flex.items-start",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.flex.rounded-control.border.border-border",
+            "context": "div.flex.shrink-0.flex-col.gap-1.5[data-testid=\"composer-input-unit\"]",
+            "contextZ": "10"
+          },
+          {
+            "element": "div.my-2.ml-9.min-w-0",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.min-w-0.flex-1.whitespace-pre-wrap.break-words[data-tts-message=\"claude:2100-01-02T11:33:00.000Z\"]",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.max-w-[75%].whitespace-pre-wrap.break-words.rounded-surface",
+            "context": "section.relative.flex.min-h-0.min-w-0[data-pan-ignore=\"true\"][data-link-path=\"$CAPTURE/home/.cla\"][data-kanban-reader=\"$CAPTURE/home/.cla\"]",
+            "contextZ": "auto"
+          }
+        ]
+      },
+      "after": {
+        "closed": false,
+        "host": null
+      }
+    },
+    {
+      "id": "menu-inside-accounts-dialog",
+      "viewport": "1440x900",
+      "ok": true,
+      "steps": [
+        "opened the Claude accounts dialog from the limits footer"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.bottom-3.left-1/2.z-50[role=\"dialog\"][aria-label=\"Claude accounts\"]",
+        "rect": {
+          "x": 255,
+          "y": 423,
+          "w": 400,
+          "h": 299
+        },
+        "context": "div.fixed.bottom-3.left-1/2.z-50[role=\"dialog\"][aria-label=\"Claude accounts\"]",
+        "contextZ": "50",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "note": "The accounts dialog holds no control that opens a menu at this head (no aria-haspopup menu, listbox or true inside it); the reading is the dialog itself over the board."
+    },
+    {
+      "id": "mic-menu-orchestrator",
+      "viewport": "390x844",
+      "ok": false,
+      "steps": [
+        "tapped the orchestrator's conversation",
+        "opened the microphone's menu (contextmenu) on the orchestrator's conversation"
+      ],
+      "coverage": {
+        "overlay": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "rect": {
+          "x": -86,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "contextZ": "40",
+        "points": 54,
+        "covered": 42,
+        "coverers": [
+          {
+            "element": "div.feed-cv[data-feed-key=\"row:3:1\"][data-feed-kind=\"image\"]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.px-3.pb-3.text-body[data-feed-state=\"items\"]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.my-2.ml-9.min-w-0",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.mt-1.block.text-[12px].text-muted",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mic-menu-docked-conversation",
+      "viewport": "390x844",
+      "ok": false,
+      "steps": [
+        "tapped a task's conversation from the board",
+        "opened the microphone's menu (contextmenu) on the task's conversation"
+      ],
+      "coverage": {
+        "overlay": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "rect": {
+          "x": -86,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "contextZ": "40",
+        "points": 54,
+        "covered": 42,
+        "coverers": [
+          {
+            "element": "div.min-h-0.flex-1.overflow-y-auto.py-3[data-log-feed-scroller=\"true\"][data-tail-lines-start=\"0\"][data-tail-line-count=\"2\"]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mic-menu-in-expanded-conversation",
+      "viewport": "390x844",
+      "ok": false,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "opened the microphone's menu (contextmenu) on the full-screen conversation"
+      ],
+      "coverage": {
+        "overlay": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "rect": {
+          "x": -86,
+          "y": 551,
+          "w": 300,
+          "h": 233
+        },
+        "context": "div.absolute.bottom-[calc(100%+6px)].right-0.z-40[role=\"menu\"][aria-label=\"Transcription method\"]",
+        "contextZ": "40",
+        "points": 54,
+        "covered": 42,
+        "coverers": [
+          {
+            "element": "div.feed-cv[data-feed-key=\"row:3:1\"][data-feed-kind=\"image\"]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.px-3.pb-3.text-body[data-feed-state=\"items\"]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "div.my-2.ml-9.min-w-0",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          },
+          {
+            "element": "button.mt-1.block.text-[12px].text-muted",
+            "context": "html.h-full.antialiased",
+            "contextZ": "auto"
+          }
+        ]
+      }
+    },
+    {
+      "id": "image-preview-from-expanded-conversation",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "tapped the orchestrator's conversation (full screen on a phone)",
+        "clicked the picture",
+        "closed the preview with its Close button"
+      ],
+      "coverage": {
+        "overlay": "div.fixed.inset-0.z-50.flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 390,
+          "h": 844
+        },
+        "context": "div.fixed.inset-0.z-50.flex[role=\"dialog\"][aria-label=\"image image\"]",
+        "contextZ": "50",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "after": {
+        "closed": true,
+        "host": {
+          "overlay": "img.max-h-[240px].max-w-full.cursor-zoom-in.rounded-[14px]",
+          "rect": {
+            "x": 49,
+            "y": 460,
+            "w": 328,
+            "h": 206
+          },
+          "context": "html.h-full.antialiased",
+          "contextZ": "auto",
+          "points": 81,
+          "covered": 0,
+          "coverers": []
+        }
+      }
+    },
+    {
+      "id": "menu-inside-accounts-dialog",
+      "viewport": "390x844",
+      "ok": true,
+      "steps": [
+        "opened Accounts & limits from More actions",
+        "opened the accounts screen's own More actions menu"
+      ],
+      "coverage": {
+        "overlay": "div.flex.flex-col[role=\"menu\"][aria-label=\"kanban\"][data-layering-probe]",
+        "rect": {
+          "x": 0,
+          "y": 290,
+          "w": 390,
+          "h": 544
+        },
+        "context": "div.fixed.inset-0.z-[60].flex[role=\"presentation\"][data-mobile2-scrim=\"true\"]",
+        "contextZ": "60",
+        "points": 81,
+        "covered": 0,
+        "coverers": []
+      },
+      "note": "The phone's accounts screen is a full screen; the menu read is the one its header opens (kanban)."
+    }
+  ]
+}

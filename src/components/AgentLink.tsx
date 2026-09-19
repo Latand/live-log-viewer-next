@@ -10,6 +10,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { appendComposerDraft } from "./TmuxComposer";
 import { cleanTitle } from "./utils";
+import { Z } from "@/components/layers";
 
 /** Accent of the agent-link gesture: the arrow, the target border highlight
     (see the [data-link-hover] rule in globals.css) and the drop chip. */
@@ -219,7 +220,7 @@ export function useLinkDrag(spec: LinkDragSpec) {
   const overlay =
     dragging || drop
       ? createPortal(
-          <div className="pointer-events-none fixed inset-0 z-[95]">
+          <div className={`pointer-events-none fixed inset-0 ${Z.feedback}`}>
             <svg className="block h-full w-full">
               <defs>
                 <marker id={markerId} markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">

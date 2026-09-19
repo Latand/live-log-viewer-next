@@ -22,6 +22,7 @@ import {
 import { ImagePane } from "./ImagePane";
 import { onArtifactPreview } from "./previewBus";
 import { TextPane } from "./TextPane";
+import { Z } from "@/components/layers";
 
 /* pdf.js is megabytes; its chunk must not exist on the network until the first
    PDF preview actually opens. */
@@ -265,7 +266,7 @@ function PreviewSheet({
       data-artifact-preview
       data-artifact-state={state}
       data-artifact-kind={kind ?? ""}
-      className={`fixed z-50 flex flex-col border-border bg-card shadow-1 focus-visible:outline-none ${
+      className={`fixed ${Z.sheet} flex flex-col border-border bg-card shadow-1 focus-visible:outline-none ${
         mobile ? "inset-0" : "inset-y-0 right-0 border-l"
       }`}
       data-artifact-preview-inset={mobile ? undefined : inset}
