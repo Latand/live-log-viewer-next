@@ -1,5 +1,6 @@
 "use client";
 
+import { ListPlus, MessageSquarePlus } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
@@ -25,6 +26,7 @@ import { cleanTitle } from "@/components/utils";
 import { canHandoff } from "@/components/HandoffHandle";
 
 import { AccountChoiceContext, ConversationAccountPopover, StageAccountPopover, useAccountChoices, type AccountTarget } from "./AccountPicker";
+import { BAR_WIDE_MIN, BarCreateGroup } from "@/components/ProjectBar";
 import { HiddenTray } from "./HiddenTray";
 import { KanbanDraftContext, KanbanTaskComposer, type KanbanDraftActions } from "./KanbanDrafts";
 import type { CardEditField } from "./CardInlineText";
@@ -123,7 +125,15 @@ export interface KanbanBoardProps {
   loaded: boolean;
   catalogFailures: number;
   selection: ReadonlySet<string>;
-  viewSwitch?: ReactNode;
+  /** The Board / Conversations switch, given whether the bar is wide enough for labels. */
+  viewSwitch?: ReactNode | ((wide: boolean) => ReactNode);
+  /** The bar's first group (the project's name and accounts), given the bar's tier (#1801). */
+  barLead?: (wide: boolean) => ReactNode;
+  /** The bar's last groups (the panel toggles and the ⋯ menu), given the bar's tier (#1801). */
+  barTrail?: (wide: boolean) => ReactNode;
+  /** A panel beside the board and under the bar (the project's Tasks panel), so the bar spans it
+      and the attention island lands over the bar instead of the panel's own header (#1801). */
+  aside?: ReactNode;
   /** The orchestrator seat above the columns (#1695 K3), given the id of the
       board region its skip link lands on. */
   seat?: (boardId: string, seatRead: OrchestratorSeatRead | null) => ReactNode;
@@ -297,14 +307,19 @@ export function KanbanBoard(props: KanbanBoardProps) {
   const assignments = props.assignmentPorts ?? browserAssignmentPorts;
   const boardId = `kb-board-${useId().replace(/:/g, "")}`;
   const rootRef = useRef<HTMLDivElement>(null);
+  const asideRef = useRef<HTMLDivElement>(null);
+  const hasAside = Boolean(props.aside);
   const [mode, setMode] = useState<KanbanLayoutMode>("wide");
+  /* The header bar's tier (#1801): labelled controls from BAR_WIDE_MIN of bar, icons below. */
+  const [barWide, setBarWide] = useState(true);
+  const [barWrap, setBarWrap] = useState(false);
   const [tab, setTab] = useState<TaskStatus>("assigned");
   const [query, setQuery] = useState("");
   const [linkQuery, setLinkQuery] = useState("");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(EMPTY_SET);
   const [dragHint, setDragHint] = useState(false);
   const menu = useOverlay<
-    { kind: "status" | "card" | "colour"; cardId: string } | { kind: "column"; status: TaskStatus } | { kind: "tray" } | { kind: "reader"; key: string; stop: ReaderStop } | { kind: "link"; key: string } | { kind: "stop"; key: string }
+    { kind: "status" | "card" | "colour"; cardId: string } | { kind: "column"; status: TaskStatus } | { kind: "tray" } | { kind: "create" } | { kind: "reader"; key: string; stop: ReaderStop } | { kind: "link"; key: string } | { kind: "stop"; key: string }
     | { kind: "pipeline"; cardId: string; pipelineId: string } | { kind: "stage"; cardId: string; pipelineId: string; stageId: string; from: "sheet" | "panel" }
     | { kind: "account"; target: AccountTarget }
   >();
@@ -586,13 +601,21 @@ export function KanbanBoard(props: KanbanBoardProps) {
   useLayoutEffect(() => {
     const element = rootRef.current;
     if (!element) return;
-    const apply = () => setMode(kanbanLayoutMode(element.getBoundingClientRect().width));
+    /* The bar spans the board and its aside; the columns' mode follows what the aside leaves them. */
+    const aside = asideRef.current;
+    const apply = () => {
+      const barWidth = element.getBoundingClientRect().width;
+      setMode(kanbanLayoutMode(barWidth - (aside?.getBoundingClientRect().width ?? 0)));
+      setBarWide(barWidth >= BAR_WIDE_MIN);
+      setBarWrap(kanbanLayoutMode(barWidth) === "tabs");
+    };
     apply();
     if (typeof ResizeObserver !== "function") return;
     const observer = new ResizeObserver(apply);
     observer.observe(element);
+    if (aside) observer.observe(aside);
     return () => observer.disconnect();
-  }, []);
+  }, [hasAside]);
 
   /* ── Flash, flights ──────────────────────────────────────────────────── */
   const flash = useCallback((cardId: string) => {
@@ -1056,6 +1079,14 @@ export function KanbanBoard(props: KanbanBoardProps) {
   const menuFor = (): { label: string; items: KanbanMenuItem[] } | null => {
     const open = menu.open;
     if (!open) return null;
+    if (open.value.kind === "create") {
+      const items: KanbanMenuItem[] = [{ type: "item", label: t("dash.newTask"), icon: <ListPlus className="ico" aria-hidden />, onSelect: () => openNewTask() }];
+      if (props.onNewAgent) {
+        const onNewAgent = props.onNewAgent;
+        items.push({ type: "item", label: t("dash.newConvo"), icon: <MessageSquarePlus className="ico" aria-hidden />, disabled: !loaded, onSelect: () => onNewAgent() });
+      }
+      return { label: t("dash.create"), items };
+    }
     if (open.value.kind === "column") {
       const status = open.value.status;
       const column = model.columns[status];
@@ -1432,7 +1463,7 @@ export function KanbanBoard(props: KanbanBoardProps) {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
-      const inBoard = Boolean(target && rootRef.current?.contains(target));
+      const inBoard = Boolean(target && rootRef.current?.contains(target) && !target.closest(".kb-aside"));
       if (event.key === "/") {
         /* Outside the board `/` stays the Viewer's global search. Inside it,
            it finds a task, and the Viewer's window listener must not open
@@ -1938,7 +1969,7 @@ export function KanbanBoard(props: KanbanBoardProps) {
     });
   }, [show, t]);
 
-  const onboardCount = model.totals.onBoard;
+  const viewSwitch = typeof props.viewSwitch === "function" ? props.viewSwitch(barWide) : props.viewSwitch;
   /* The Overview narrows permanently, so its columns read «3 of 41» and an
      empty one says so, exactly as they do under a search. */
   const searching = query.trim().length > 0;
@@ -2004,7 +2035,7 @@ export function KanbanBoard(props: KanbanBoardProps) {
   };
   const closeNewTask = useCallback(() => {
     setComposingTask(false);
-    queueMicrotask(() => rootRef.current?.querySelector<HTMLElement>("[data-new-task]")?.focus({ preventScroll: true }));
+    queueMicrotask(() => rootRef.current?.querySelector<HTMLElement>("[data-new-task], [data-bar-create]")?.focus({ preventScroll: true }));
   }, []);
   const taskCreated = useCallback((task: BoardTask) => {
     setComposingTask(false);
@@ -2115,71 +2146,109 @@ export function KanbanBoard(props: KanbanBoardProps) {
     />
   ) : null;
 
+  /* The search field and the Hidden pill, shared by the project's bar and the Overview's. */
+  const searchField = (group?: string) => (
+    <label className="search" data-bar-group={group}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+      <input
+        type="search"
+        placeholder={t("kanban.find")}
+        aria-label={t("kanban.find")}
+        data-kanban-search=""
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+      />
+    </label>
+  );
+  /* Narrow, the project's pill is icon and count, the shape Tasks has (#1801), and its name moves to the tooltip. */
+  const hiddenPill = (labelled: boolean) => (
+    <button
+      type="button"
+      className="btn hidden-pill"
+      data-count={hiddenCount}
+      data-hidden-pill=""
+      aria-label={t("kanban.hiddenAria", { count: hiddenCount })}
+      title={labelled ? undefined : t("kanban.hiddenAria", { count: hiddenCount })}
+      onClick={(event) => menu.setOpen({ anchor: event.currentTarget, value: { kind: "tray" } })}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 3l18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 4.2A10.9 10.9 0 0 1 12 4c6 0 10 8 10 8a17.7 17.7 0 0 1-3.2 4.1" /><path d="M6.6 6.6C3.9 8.5 2 12 2 12s4 8 10 8a10.9 10.9 0 0 0 4.4-.9" /></svg>
+      {labelled ? <>{t("kanban.hidden")} </> : null}<span className="count num">{hiddenCount}</span>
+    </button>
+  );
+
   return (
     <AccountChoiceContext.Provider value={accountChoice}>
     <KanbanDraftContext.Provider value={draftActions}>
     <div ref={rootRef} className="kb" data-kanban-board="" data-mode={mode}>
-      <header className="bar">
-        <span className="summary">
-          <span className="dot" aria-hidden="true" />
-          <span className="num">{t("kanban.summaryWorking", { count: model.totals.working })}</span>
-          {model.totals.needsYou ? (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="dot warn" aria-hidden="true" />
-              <span className="num">{t("kanban.summaryNeeds", { count: model.totals.needsYou })}</span>
-            </>
-          ) : null}
-          <span aria-hidden="true">·</span>
-          <span className="num">{t("kanban.summaryTasks", { count: onboardCount })}</span>
-        </span>
-        {catalogFailures > 0 ? <span className="bar-alert" role="alert">{t("kanban.filesFailed")}</span> : null}
-        <span className="grow" />
-        <div className="bar-tools">
-          <label className="search">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
-            <input
-              type="search"
-              placeholder={t("kanban.find")}
-              aria-label={t("kanban.find")}
-              data-kanban-search=""
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-          <button
-            type="button"
-            className="btn hidden-pill"
-            data-count={hiddenCount}
-            data-hidden-pill=""
-            aria-label={t("kanban.hiddenAria", { count: hiddenCount })}
-            onClick={(event) => menu.setOpen({ anchor: event.currentTarget, value: { kind: "tray" } })}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 3l18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 4.2A10.9 10.9 0 0 1 12 4c6 0 10 8 10 8a17.7 17.7 0 0 1-3.2 4.1" /><path d="M6.6 6.6C3.9 8.5 2 12 2 12s4 8 10 8a10.9 10.9 0 0 0 4.4-.9" /></svg>
-            {t("kanban.hidden")} <span className="count num">{hiddenCount}</span>
-          </button>
-          {props.viewSwitch ? <span className="view-switch">{props.viewSwitch}</span> : null}
-        </div>
-        {/* Both creation surfaces write into ONE project's board. The Overview
-            has no single project to write into, so it offers neither rather
-            than picking one for the operator — and the slot itself goes with
-            them, so the bar keeps no empty cell where they were (#1820). */}
-        {props.overview && !props.onNewAgent ? null : (
-          <div className="bar-create">
-            {props.overview ? null : (
-              <button type="button" className="btn" data-new-task="" aria-label={t("dash.newTask")} aria-expanded={composingTask} onClick={openNewTask}>
-                <span className="plus" aria-hidden="true">+</span> {t("dash.task")}
-              </button>
-            )}
-            {props.onNewAgent ? (
+      {/* The project board's one header bar (#1801, docs/design/board-header.md): where am I, what is
+          happening, one spacer, find, view, create, panels, more. The two ends are the project's own
+          (`barLead`, `barTrail`); the right reserve is the Viewer's attention island. */}
+      {props.overview ? (
+        /* The Overview keeps the bar it had before the project board's header was put in order
+           (#1801 was the project board only): its three facts, and the tools wrapping under the
+           island on its narrow faces. */
+        <header className="bar" data-bar="overview">
+          <span className="summary">
+            <span className="dot" aria-hidden="true" />
+            <span className="num">{t("kanban.overviewWorking", { count: model.totals.working })}</span>
+            {model.totals.needsYou ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="dot warn" aria-hidden="true" />
+                <span className="num">{t("kanban.overviewNeeds", { count: model.totals.needsYou })}</span>
+              </>
+            ) : null}
+            <span aria-hidden="true">·</span>
+            <span className="num">{t("kanban.overviewTasks", { count: model.totals.onBoard })}</span>
+          </span>
+          {catalogFailures > 0 ? <span className="bar-alert" role="alert">{t("kanban.filesFailed")}</span> : null}
+          <span className="grow" />
+          <div className="bar-tools">
+            {searchField()}
+            {hiddenPill(true)}
+            {viewSwitch ? <span className="view-switch">{viewSwitch}</span> : null}
+          </div>
+          {props.onNewAgent ? (
+            <div className="bar-create">
               <button type="button" className="btn" data-new-agent="" aria-label={t("dash.newConvo")} disabled={!loaded} onClick={props.onNewAgent}>
                 <span className="plus" aria-hidden="true">+</span> {t("dash.agent")}
               </button>
-            ) : null}
+            </div>
+          ) : null}
+        </header>
+      ) : (
+        <header className="bar" data-bar="project" data-bar-tier={barWide ? "wide" : "narrow"} data-bar-wrap={barWrap ? "" : undefined}>
+          {props.barLead ? <div className="bar-slot bar-lead" data-bar-group="where">{props.barLead(barWide)}</div> : null}
+          <span className="summary" data-bar-group="status">
+            {catalogFailures > 0 ? <span className="bar-alert" role="alert">{t("kanban.filesFailed")}</span> : (
+              <>
+                <span className="dot" aria-hidden="true" />
+                <span className="num" data-bar-working="">{t("kanban.summaryWorking", { count: model.totals.working })}</span>
+              </>
+            )}
+          </span>
+          <span className="grow" />
+          {searchField("find")}
+          <div className="bar-group" data-bar-group="view">
+            {hiddenPill(barWide)}
+            {viewSwitch ? <span className="bar-slot view-switch">{viewSwitch}</span> : null}
           </div>
-        )}
-      </header>
+          {/* Both creation surfaces write into this project's board. Narrow, the two are one `+`
+              with a two-row menu. */}
+          <div className="bar-slot">
+            <BarCreateGroup
+              wide={barWide}
+              task={{ onClick: openNewTask, expanded: composingTask }}
+              agent={props.onNewAgent ? { onClick: props.onNewAgent, disabled: !loaded } : null}
+              onMenu={(anchor) => menu.setOpen({ anchor, value: { kind: "create" } })}
+              menuOpen={menu.open?.value.kind === "create" || composingTask}
+            />
+          </div>
+          {props.barTrail ? <div className="bar-slot bar-trail" data-bar-group="trail">{props.barTrail(barWide)}</div> : null}
+        </header>
+      )}
 
+      <div className="kb-body">
       <div className="kb-page">
       {props.seat ? props.seat(boardId, props.seatRefs === undefined ? seatRead : null) : null}
       <div className="board-frame" id={boardId} tabIndex={-1} aria-label={t("kanban.columns")}>
@@ -2232,6 +2301,8 @@ export function KanbanBoard(props: KanbanBoardProps) {
         </div>
       )}
       </div>
+      </div>
+      {props.aside ? <div ref={asideRef} className="kb-aside">{props.aside}</div> : null}
       </div>
       <div ref={parkRef} className="reader-park" hidden aria-hidden="true" />
       {sheetView}

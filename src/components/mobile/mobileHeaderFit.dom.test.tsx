@@ -22,8 +22,8 @@ import type { BoardTask } from "@/lib/tasks/types";
  *
  * Issue #1054 added global search to this row, so the props below are the
  * COMPLETE mobile control combination — every optional control present at once.
- * The budget is five 44px targets, so search's arrival folded board undo into
- * the «⋯» menu beside the redo already there; a sixth target measured the
+ * The budget is five 44px targets (board undo, once folded into «⋯», left
+ * with #1801); a sixth target measured the
  * project name down to 25px (the mobile browser harness holds the pixel
  * floor).
  */
@@ -173,7 +173,7 @@ beforeEach(() => {
   dom.document.body.replaceChildren();
   dom.sessionStorage.clear();
   dom.localStorage.clear();
-  /* A closed card in the device-local log → the header offers undo (#184). */
+  /* A closed card in the device-local log: the header no longer offers undo for it (#1801). */
   dom.localStorage.setItem(
     `llvBoardHistory:${PROJECT}`,
     JSON.stringify({ entries: [{ kind: "close", path: "/repo/closed.jsonl", title: "Closed card" }], cursor: 1 }),
@@ -232,8 +232,8 @@ test("the 390px header row keeps one elastic cell — the project name — and f
     expect(labels.some((entry) => entry.startsWith(translate("en", key)))).toBe(true);
   }
   expect(triggers).toHaveLength(5);
-  /* Undo bought that slot by folding into «⋯» — it is no longer in the row. */
-  expect(labels.some((entry) => entry.startsWith(translate("en", "board.undo")))).toBe(false);
+  /* Undo left the phone with the desktop header (#1801; kanban undo is #1856). */
+  expect(labels.some((entry) => entry.startsWith("Undo"))).toBe(false);
 
   /* The search target is wired to the shell's palette, not decoration. */
   const searchButton = row.querySelector('[data-testid="dash-search"]') as unknown as HTMLButtonElement;
@@ -280,32 +280,17 @@ test("both board faces stay one tap away inside the «more» menu and still swit
   expect(reopened[1]!.getAttribute("aria-checked")).toBe("true");
 });
 
-test("board undo folded into the «⋯» menu is still one tap and still undoes (#1054)", async () => {
+test("Undo and Redo are not «⋯» items, even with a close in the device-local log (#1801; kanban undo is #1856)", async () => {
   const host = mount();
   expect(await waitFor(() => shelfReady(host))).toBe(true);
-
-  const openMenu = () => {
-    const more = Array.from(header(host).querySelectorAll("button")).find(
-      (el) => label(el) === translate("en", "dash.moreMenu"),
-    ) as unknown as HTMLButtonElement;
-    flushSync(() => more.click());
-  };
-  openMenu();
+  const more = Array.from(header(host).querySelectorAll("button")).find(
+    (el) => label(el) === translate("en", "dash.moreMenu"),
+  ) as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
   await settle();
-
-  const undo = Array.from(header(host).querySelectorAll('[role="menuitem"]')).find(
-    (el) => label(el) === translate("en", "board.undo"),
-  ) as unknown as HTMLButtonElement | undefined;
-  expect(undo).toBeDefined();
-  /* The seeded log holds one close, so undo acts and the log empties — the item
-     is gone on the next open, exactly as the row button used to disappear. */
-  flushSync(() => undo!.click());
-  await settle();
-  openMenu();
-  await settle();
-  const afterwards = Array.from(header(host).querySelectorAll('[role="menuitem"]')).map(label);
-  expect(afterwards).not.toContain(translate("en", "board.undo"));
-  expect(afterwards).toContain(translate("en", "board.redo"));
+  const items = Array.from(header(host).querySelectorAll('[role="menuitem"]')).map(label);
+  expect(items.length).toBeGreaterThan(0);
+  expect(items.some((entry) => /^(Undo|Redo)/.test(entry))).toBe(false);
 });
 
 /*

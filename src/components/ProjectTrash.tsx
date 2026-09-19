@@ -169,15 +169,25 @@ export function ArchiveProjectButton({
   allowEmpty = false,
   onArchive,
   compact = false,
+  rowClassName,
 }: {
   files: FileEntry[];
   allowEmpty?: boolean;
   onArchive: () => void;
   compact?: boolean;
+  /** Drawn as a row of the desktop bar's ⋯ menu (#1801), in these classes. */
+  rowClassName?: string;
 }) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   if ((!files.length && !allowEmpty) || files.some((file) => file.proc === "running" || file.activity === "live")) return null;
+  if (rowClassName !== undefined) {
+    return (
+      <button type="button" className={rowClassName} data-project-archive="" onClick={() => { onArchive(); gotoOverview(); }}>
+        <Archive className="h-[15px] w-[15px]" aria-hidden /> {t("trash.toArchive")}
+      </button>
+    );
+  }
   return (
     <button
       type="button"
@@ -201,7 +211,13 @@ export function ArchiveProjectButton({
  * action. Shown only while nothing in the project runs; the API additionally
  * refuses any entry whose process is still alive.
  */
-export function DeleteProjectButton({ project, files, available }: { project: string; files: FileEntry[]; available: boolean }) {
+export function DeleteProjectButton({ project, files, available, rowClassName }: {
+  project: string;
+  files: FileEntry[];
+  available: boolean;
+  /** Drawn as a danger row of the desktop bar's ⋯ menu (#1801); the confirm opens in place. */
+  rowClassName?: string;
+}) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [confirming, setConfirming] = useState(false);
@@ -248,7 +264,7 @@ export function DeleteProjectButton({ project, files, available }: { project: st
 
   if (confirming) {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-danger/30 bg-danger-soft px-1.5 py-0.5 text-[11px]">
+      <span className={`inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-danger/30 bg-danger-soft px-1.5 py-0.5 text-[11px] ${rowClassName !== undefined ? "flex-wrap" : ""}`}>
         <span className="px-0.5 font-semibold text-danger">
           {t("trash.confirmDelete", { count: targets?.length ?? 0 })}
         </span>
@@ -272,6 +288,16 @@ export function DeleteProjectButton({ project, files, available }: { project: st
           {t("common.cancel")}
         </button>
       </span>
+    );
+  }
+  if (rowClassName !== undefined) {
+    return (
+      <>
+        <button type="button" className={`${rowClassName} text-danger`} data-project-delete="" disabled={busy} onClick={() => void prepare()}>
+          <Trash2 className="h-[15px] w-[15px]" aria-hidden /> {busy ? "…" : t("trash.deleteProject")}
+        </button>
+        {error ? <span className="px-2 text-[11px] font-semibold text-danger">{error}</span> : null}
+      </>
     );
   }
   return (

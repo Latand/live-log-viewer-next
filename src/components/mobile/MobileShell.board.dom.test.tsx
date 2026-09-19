@@ -18,7 +18,7 @@ import type { BoardTask } from "@/lib/tasks/types";
  *   - no docked background-task rows on the phone — they are host data in the
  *     host sheet behind ⋯ › Host details;
  *   - ⋯ opens the board menu over the board, whose rows still reach every
- *     former header control: the two board faces, undo, accounts, the host
+ *     former header control: the two board faces, accounts, the host
  *     sheet, archive — and archive answers with a receipt carrying Restore.
  */
 
@@ -207,7 +207,7 @@ beforeEach(() => {
   dom.location.hash = "#p=" + encodeURIComponent(PROJECT);
   getMobileNav().home();
   receipts.dismiss();
-  /* A closed card in the device-local log → the menu offers undo (#184). */
+  /* A closed card in the device-local log: the menu no longer offers undo for it (#1801). */
   dom.localStorage.setItem(
     `llvBoardHistory:${PROJECT}`,
     JSON.stringify({ entries: [{ kind: "close", path: "/repo/closed.jsonl", title: "Closed card" }], cursor: 1 }),
@@ -304,7 +304,7 @@ test("⋯ opens the board menu over the board with every former header control a
   await openMenu(root);
   expect(boardReady(root)).toBe(true);
   const rows = Array.from(root.querySelectorAll("[data-mobile2-menu-row]")).map((el) => el.getAttribute("data-mobile2-menu-row"));
-  expect(rows).toEqual(["new-agent", "new-task", "new-pipeline", "tasks", "view-board", "view-catalog", "accounts", "host", "undo", "archive"]);
+  expect(rows).toEqual(["new-agent", "new-task", "new-pipeline", "tasks", "view-board", "view-catalog", "accounts", "host", "archive"]);
   for (const row of root.querySelectorAll("[data-mobile2-menu-row]")) expect((row as unknown as HTMLElement).className).toContain("min-h-11");
   expect(q(root, '[data-mobile2-go="accounts"]')).not.toBeNull();
   expect(q(root, '[data-mobile2-open="host"]')).not.toBeNull();
@@ -333,16 +333,12 @@ test("both board faces stay one tap away inside the menu, announced as radio row
   expect(reopened[1]!.getAttribute("aria-checked")).toBe("true");
 });
 
-test("board undo folded into the menu is still one tap and still undoes (#1054)", async () => {
+test("Undo and Redo are not menu rows, even with a close in the device-local log (#1801; kanban undo is #1856)", async () => {
   const root = mount();
   expect(await waitFor(() => boardReady(root))).toBe(true);
   await openMenu(root);
-  click(q(root, '[data-mobile2-menu-row="undo"]'));
-  await settle();
-  expect(q(root, '[data-mobile2-sheet="menu"]')).toBeNull();
-  await openMenu(root);
   expect(q(root, '[data-mobile2-menu-row="undo"]')).toBeNull();
-  expect(q(root, '[data-mobile2-menu-row="redo"]')).not.toBeNull();
+  expect(q(root, '[data-mobile2-menu-row="redo"]')).toBeNull();
 });
 
 test("Accounts & limits pushes the shell's accounts screen; ‹ returns to the board", async () => {

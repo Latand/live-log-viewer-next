@@ -8,10 +8,21 @@ import { useLocale } from "@/lib/i18n";
 
 import { AccountsPanel, type ProjectAccountContext } from "./AccountsPanel";
 import { ChevronDown, Loader2 } from "./icons";
+import { BAR_CONTROL, BAR_MENU_ROW, BAR_OUTLINED } from "./ProjectBar";
 import { getMobileNav } from "./mobile/mobileNav";
 import { engineTintOf } from "./utils";
 
 const ENGINE_LABEL: Record<"claude" | "codex", string> = { claude: "Claude", codex: "Codex" };
+
+/** How the trigger is drawn: the standalone chip, an outlined control of the project header bar,
+    or a row of that bar's ⋯ menu (#1801, docs/design/board-header.md). */
+export type EngineAccountSwitchAppearance = "chip" | "bar" | "menu";
+
+const TRIGGER_CLASS: Record<EngineAccountSwitchAppearance, string> = {
+  chip: "flex h-8 items-center gap-1 rounded-[7px] border border-border bg-canvas px-2 text-[11px] font-semibold hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+  bar: `${BAR_CONTROL} ${BAR_OUTLINED}`,
+  menu: BAR_MENU_ROW,
+};
 
 /**
  * Compact per-engine account trigger in account-bearing headers (#40, #1331).
@@ -23,19 +34,24 @@ const ENGINE_LABEL: Record<"claude" | "codex", string> = { claude: "Claude", cod
  * side; the active account label joins it from `sm:` up, and always lives in
  * the accessible name.
  */
-export function EngineAccountSwitch({ engine, projectContext }: { engine: "claude" | "codex"; projectContext?: ProjectAccountContext }) {
+export function EngineAccountSwitch({ engine, projectContext, appearance }: { engine: "claude" | "codex"; projectContext?: ProjectAccountContext; appearance?: EngineAccountSwitchAppearance }) {
   const isMobile = useIsMobile();
   /* The phone has one accounts surface (mobile v2 lane 9, README §4.8): the
      Accounts & limits screen. The trigger pushes it instead of floating the
      desktop dialog over whatever the operator is looking at. */
   const openScreen = isMobile ? () => getMobileNav().push({ kind: "accounts" }) : undefined;
-  return <EngineAccountSwitchControl state={useEngineAccounts(engine)} projectContext={projectContext} onOpenScreen={openScreen} />;
+  return <EngineAccountSwitchControl state={useEngineAccounts(engine)} projectContext={projectContext} onOpenScreen={openScreen} appearance={appearance} />;
 }
 
 /** Interactive rendering half, separated so collapsed and expanded behavior
     can be exercised with a deterministic account state. With `onOpenScreen`
     the trigger hands over to that screen and never opens the dialog. */
-export function EngineAccountSwitchControl({ state, projectContext, onOpenScreen }: { state: EngineAccountsState; projectContext?: ProjectAccountContext; onOpenScreen?: () => void }) {
+export function EngineAccountSwitchControl({ state, projectContext, onOpenScreen, appearance = "chip" }: {
+  state: EngineAccountsState;
+  projectContext?: ProjectAccountContext;
+  onOpenScreen?: () => void;
+  appearance?: EngineAccountSwitchAppearance;
+}) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -65,7 +81,7 @@ export function EngineAccountSwitchControl({ state, projectContext, onOpenScreen
   const draining = state.migration?.state === "draining";
 
   return (
-    <div ref={containerRef} data-account-switch-engine={state.engine} className="relative shrink-0">
+    <div ref={containerRef} data-account-switch-engine={state.engine} className={`relative shrink-0 ${appearance === "menu" ? "w-full" : ""}`}>
       <button
         ref={triggerRef}
         type="button"
@@ -74,10 +90,11 @@ export function EngineAccountSwitchControl({ state, projectContext, onOpenScreen
         aria-label={`${t("accounts.triggerAria", { engine: engineName })} — ${label}`}
         title={`${engineName} · ${label}`}
         onClick={() => (onOpenScreen ? onOpenScreen() : setOpen((value) => !value))}
-        className="flex h-8 items-center gap-1 rounded-[7px] border border-border bg-canvas px-2 text-[11px] font-semibold hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        data-account-switch-appearance={appearance}
+        className={TRIGGER_CLASS[appearance]}
       >
-        <span className="shrink-0 font-bold" style={{ color: tint.color }}>{engineName}</span>
-        <span className="hidden max-w-32 truncate sm:inline">{label}</span>
+        <span className={`shrink-0 ${appearance === "chip" ? "font-bold" : ""}`} style={{ color: tint.color }}>{engineName}</span>
+        <span className={appearance === "menu" ? "min-w-0 flex-1 truncate" : "hidden max-w-32 truncate sm:inline"}>{label}</span>
         {draining ? (
           <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
         ) : (

@@ -22,7 +22,12 @@ import { handleOverlayEscape } from "@/lib/overlay";
  * asset there is nothing to enable, and a toggle that cannot do anything is
  * worse than an absent one.
  */
-export function SoundToggle({ ambientAvailable }: { ambientAvailable?: boolean } = {}) {
+export function SoundToggle({ ambientAvailable, variant = "cluster", rowClassName = "" }: {
+  ambientAvailable?: boolean;
+  /** `menu`: two rows of the desktop bar's ⋯ menu (#1801), the levels opening in place under them. */
+  variant?: "cluster" | "menu";
+  rowClassName?: string;
+} = {}) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const prefs = useAudioPrefs();
@@ -52,6 +57,106 @@ export function SoundToggle({ ambientAvailable }: { ambientAvailable?: boolean }
     setAudioPrefs(patch);
     ensureAmbientLoop();
   };
+
+  const levels = (
+    <>
+      <label className="block space-y-1">
+        <span className="block text-[11px] font-semibold text-secondary">{t("sound.cueVolume")}</span>
+        <input
+          type="range"
+          data-testid="cue-volume"
+          min={0}
+          max={1}
+          step={0.05}
+          value={prefs.cueVolume}
+          aria-label={t("sound.cueVolume")}
+          onChange={(event) => setLevel({ cueVolume: Number(event.target.value) })}
+          className="w-full accent-accent"
+        />
+      </label>
+
+      {/* No asset, no rows. */}
+      {ambient ? (
+        <>
+          {/* Two independent switches, one shared level: music in the
+              Viewer and music during a call compose freely, and with both
+              on it is one track across the call boundary. */}
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              data-testid="ambient-viewer-enabled"
+              checked={prefs.viewerLoopEnabled}
+              onChange={(event) => {
+                setAudioPrefs({ viewerLoopEnabled: event.target.checked });
+                ensureAmbientLoop();
+              }}
+              className="accent-accent"
+            />
+            <span className="text-[11px] font-semibold text-secondary">{t("sound.ambientViewer")}</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              data-testid="ambient-enabled"
+              checked={prefs.loopEnabled}
+              onChange={(event) => {
+                setAudioPrefs({ loopEnabled: event.target.checked });
+                ensureAmbientLoop();
+              }}
+              className="accent-accent"
+            />
+            <span className="text-[11px] font-semibold text-secondary">{t("sound.ambient")}</span>
+          </label>
+          <label className="block space-y-1">
+            <span className="block text-[11px] text-muted">{t("sound.ambientVolume")}</span>
+            <input
+              type="range"
+              data-testid="ambient-volume"
+              min={0}
+              max={1}
+              step={0.05}
+              value={prefs.loopVolume}
+              aria-label={t("sound.ambientVolume")}
+              onChange={(event) => setLevel({ loopVolume: Number(event.target.value) })}
+              className="w-full accent-accent"
+            />
+          </label>
+          <p className="text-[10.5px] leading-snug text-muted">{t("sound.ambientHint")}</p>
+        </>
+      ) : null}
+    </>
+  );
+
+  if (variant === "menu") {
+    return (
+      <>
+        <button
+          type="button"
+          className={rowClassName}
+          aria-pressed={prefs.cuesEnabled}
+          onClick={toggleMaster}
+        >
+          {prefs.cuesEnabled ? <Volume2 className="h-[15px] w-[15px]" aria-hidden /> : <VolumeX className="h-[15px] w-[15px]" aria-hidden />}
+          {prefs.cuesEnabled ? t("sound.mute") : t("sound.unmute")}
+        </button>
+        <button
+          type="button"
+          data-testid="sound-settings-trigger"
+          className={rowClassName}
+          aria-expanded={open}
+          onClick={() => setOpen((was) => !was)}
+        >
+          <SlidersHorizontal className="h-[15px] w-[15px]" aria-hidden />
+          {t("sound.settings")}
+        </button>
+        {open ? (
+          <div data-testid="sound-settings" role="group" aria-label={t("sound.settings")} className="space-y-2 px-2 pb-1">
+            {levels}
+          </div>
+        ) : null}
+      </>
+    );
+  }
 
   return (
     <span className="ml-auto inline-flex shrink-0 items-center gap-1">
@@ -94,70 +199,7 @@ export function SoundToggle({ ambientAvailable }: { ambientAvailable?: boolean }
             }}
             className="absolute right-0 top-full z-50 mt-1 w-56 space-y-2 rounded-control border border-border bg-card p-2 shadow-2"
           >
-            <label className="block space-y-1">
-              <span className="block text-[11px] font-semibold text-secondary">{t("sound.cueVolume")}</span>
-              <input
-                type="range"
-                data-testid="cue-volume"
-                min={0}
-                max={1}
-                step={0.05}
-                value={prefs.cueVolume}
-                aria-label={t("sound.cueVolume")}
-                onChange={(event) => setLevel({ cueVolume: Number(event.target.value) })}
-                className="w-full accent-accent"
-              />
-            </label>
-
-            {/* No asset, no rows. */}
-            {ambient ? (
-              <>
-                {/* Two independent switches, one shared level: music in the
-                    Viewer and music during a call compose freely, and with both
-                    on it is one track across the call boundary. */}
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    data-testid="ambient-viewer-enabled"
-                    checked={prefs.viewerLoopEnabled}
-                    onChange={(event) => {
-                      setAudioPrefs({ viewerLoopEnabled: event.target.checked });
-                      ensureAmbientLoop();
-                    }}
-                    className="accent-accent"
-                  />
-                  <span className="text-[11px] font-semibold text-secondary">{t("sound.ambientViewer")}</span>
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    data-testid="ambient-enabled"
-                    checked={prefs.loopEnabled}
-                    onChange={(event) => {
-                      setAudioPrefs({ loopEnabled: event.target.checked });
-                      ensureAmbientLoop();
-                    }}
-                    className="accent-accent"
-                  />
-                  <span className="text-[11px] font-semibold text-secondary">{t("sound.ambient")}</span>
-                </label>
-                <label className="block space-y-1">
-                  <span className="block text-[11px] text-muted">{t("sound.ambientVolume")}</span>
-                  <input
-                    type="range"
-                    data-testid="ambient-volume"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={prefs.loopVolume}
-                    aria-label={t("sound.ambientVolume")}
-                    onChange={(event) => setLevel({ loopVolume: Number(event.target.value) })}
-                    className="w-full accent-accent"
-                  />
-                </label>
-                <p className="text-[10.5px] leading-snug text-muted">{t("sound.ambientHint")}</p>
-              </>
-            ) : null}
+            {levels}
           </div>
         ) : null}
       </span>

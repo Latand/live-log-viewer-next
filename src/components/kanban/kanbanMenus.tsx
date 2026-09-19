@@ -25,6 +25,8 @@ export type KanbanMenuItem =
     /** The item moves focus itself (an editor opens, the card leaves): the
         menu closes without handing focus back to its anchor. */
     keepFocus?: boolean;
+    /** A leading icon, the way the header's ⋯ rows carry one. */
+    icon?: ReactNode;
     onSelect: () => void;
   };
 
@@ -132,6 +134,7 @@ export function KanbanMenu({ anchor, label, items, onClose }: {
               item.onSelect();
             }}
           >
+            {item.icon ?? null}
             {item.status ? <span className="st" data-status={item.status} /> : null}
             {item.type === "radio" ? <CheckGlyph /> : null}
             <span className="lbl">

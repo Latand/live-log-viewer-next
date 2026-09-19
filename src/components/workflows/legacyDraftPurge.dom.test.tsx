@@ -49,6 +49,13 @@ const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 const { MobileFocusView } = await import("@/components/mobile/MobileFocusView");
 
 const dom = new Window({ url: "http://localhost/" });
+/* The Board measures itself for its bar's tier (#1801); happy-dom lays nothing
+   out, so the board reports a desktop width and its bar carries «+ Agent». */
+const measureRect = dom.HTMLElement.prototype.getBoundingClientRect;
+dom.HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+  const rect = measureRect.call(this);
+  return this.classList?.contains("kb") ? { ...rect, width: 2292, right: 2292 } as DOMRect : rect;
+} as typeof measureRect;
 
 /* Every global this file overrides is installed in beforeAll and restored in
    afterAll — bun shares one process across test files, so a leaked `fetch`/

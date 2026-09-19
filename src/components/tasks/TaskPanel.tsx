@@ -165,7 +165,7 @@ export function TaskPanel({
   );
 
   return (
-    <aside className="flex w-[280px] shrink-0 flex-col border-l border-border bg-card" aria-label={t("tasks.panelTitle")}>
+    <aside className="flex w-[280px] shrink-0 flex-col border-l border-border bg-card" aria-label={t("tasks.panelTitle")} data-task-panel="">
       <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
         <span className="text-[12px] font-bold">{t("tasks.panelTitle")}</span>
         <div className="ml-1 flex items-center rounded-full border border-border p-0.5">

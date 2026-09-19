@@ -15,8 +15,8 @@ import type { TaskMutationPorts } from "./useTaskMutations";
 const dom = new Window({ url: "http://localhost/" });
 const matchMedia = () => ({ matches: false, media: "", addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false });
 (dom as unknown as { matchMedia: typeof matchMedia }).matchMedia = matchMedia;
-/* The board's width, as its ResizeObserver reports it. */
-let boardWidth = 1440;
+/* The board's width, as its ResizeObserver reports it: wide enough for the bar's labelled tier (#1801). */
+let boardWidth = 1760;
 const resizeCallbacks = new Set<() => void>();
 class TestResizeObserver {
   private readonly callback: () => void;
@@ -61,7 +61,7 @@ let posts: Array<{ url: string; body: Record<string, unknown> }> = [];
 let taskAnswer: (body: Record<string, unknown>) => Response = () => new Response("{}", { status: 500 });
 let previousFetch: typeof fetch;
 beforeEach(() => {
-  boardWidth = 1440;
+  boardWidth = 1760;
   posts = [];
   previousFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

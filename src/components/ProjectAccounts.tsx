@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { EngineAccountSwitch } from "./EngineAccountSwitch";
+import { EngineAccountSwitch, type EngineAccountSwitchAppearance } from "./EngineAccountSwitch";
 
 /** One engine's block of the project view served by /api/account-project-bindings. */
 export interface ProjectAccountsEngineView {
@@ -72,7 +72,7 @@ export function parseProjectAccountsView(body: unknown): ProjectAccountsView | n
  * engines each get one compact active-account switch; project pool, carrier,
  * and out-of-pool detail moves into that switch's panel (#1331).
  */
-export function ProjectAccounts({ project }: { project: string }) {
+export function ProjectAccounts({ project, appearance }: { project: string; appearance?: EngineAccountSwitchAppearance }) {
   const [view, setView] = useState<ProjectAccountsView | null>(null);
 
   useEffect(() => {
@@ -91,20 +91,25 @@ export function ProjectAccounts({ project }: { project: string }) {
     return () => { live = false; };
   }, [project]);
 
-  return <ProjectAccountsStrip view={view} />;
+  return <ProjectAccountsStrip view={view} appearance={appearance} />;
 }
 
 /** The rendering half, separated so it can be exercised without a fetch. */
-export function ProjectAccountsStrip({ view }: { view: ProjectAccountsView | null }) {
+export function ProjectAccountsStrip({ view, appearance }: { view: ProjectAccountsView | null; appearance?: EngineAccountSwitchAppearance }) {
   const shown = (view?.engines ?? []).filter((engine) =>
     engine.restricted || engine.carrying.length > 0 || engine.outsidePool.length > 0);
   if (!view || !shown.length) return null;
   return (
-    <div data-project-accounts={view.project} className="flex min-w-0 shrink-0 items-center gap-1">
+    /* In the header bar the switches are one group, 8 px apart; in its ⋯ menu, one row per engine. */
+    <div
+      data-project-accounts={view.project}
+      className={appearance === "menu" ? "flex flex-col gap-0.5" : `flex min-w-0 shrink-0 items-center ${appearance === "bar" ? "gap-2" : "gap-1"}`}
+    >
       {shown.map((engine) => (
         <EngineAccountSwitch
           key={engine.engine}
           engine={engine.engine}
+          appearance={appearance}
           projectContext={{
             project: view.project,
             restricted: engine.restricted,

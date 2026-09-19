@@ -1095,10 +1095,13 @@ export function Viewer() {
             phone the badge lives in the board header and the toast docks in flow
             below (see the mobile banner), so this fixed anchor is desktop-only. */}
         {isMobile ? null : (
-          /* top-12 clears the 40px board header row: the island renders in the
-             zero state too now, so parking it at top-4 would permanently cover
-             the header's own right-side buttons (Orchestrator, board views). */
-          <div className="pointer-events-none fixed right-4 top-12 z-50 flex flex-col items-end gap-2">
+          /* On a project, top-[10px] centres the 28px island in the board's one
+             48px header bar (#1801), whose right 236px are reserved for it. The
+             Overview keeps its 40px title row above its board bar, so there
+             top-12 parks it in that bar's reserve instead, clear of the row.
+             On a project the 16px gap drops the toast to y 54, clear of the
+             bar's bottom border at 48. */
+          <div className={`pointer-events-none fixed right-4 ${project === OVERVIEW ? "top-12 gap-2" : "top-[10px] gap-4"} z-50 flex flex-col items-end`}>
             {attentionBadge}
             {toastFile ? (
               <AttentionToast

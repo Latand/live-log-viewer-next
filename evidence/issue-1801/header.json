@@ -1,0 +1,4392 @@
+{
+  "commit": "17dae34bfcd600639a3e5277edc0cb59f8a996a7",
+  "2540-en-light": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 2292,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "Claude accounts — switch or add — Main",
+        "rect": {
+          "x": 408.96875,
+          "y": 7.5,
+          "w": 114.96875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Codex accounts — switch or add — Main",
+        "rect": {
+          "x": 531.9375,
+          "y": 7.5,
+          "w": 111.75,
+          "h": 32
+        }
+      },
+      {
+        "name": "5 working",
+        "rect": {
+          "x": 659.6875,
+          "y": 14.796875,
+          "w": 65.359375,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Find a task",
+        "rect": {
+          "x": 1109.3125,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 hidden tasks and conversations",
+        "rect": {
+          "x": 1545.3125,
+          "y": 7.5,
+          "w": 99.265625,
+          "h": 32
+        }
+      },
+      {
+        "name": "BoardConversations",
+        "rect": {
+          "x": 1652.578125,
+          "y": 7.5,
+          "w": 201.875,
+          "h": 32
+        }
+      },
+      {
+        "name": "New task",
+        "rect": {
+          "x": 1870.453125,
+          "y": 7.5,
+          "w": 70.203125,
+          "h": 32
+        }
+      },
+      {
+        "name": "New conversation with an agent",
+        "rect": {
+          "x": 1948.65625,
+          "y": 7.5,
+          "w": 80,
+          "h": 32
+        }
+      },
+      {
+        "name": "Orchestrator panel",
+        "rect": {
+          "x": 2044.65625,
+          "y": 7.5,
+          "w": 115.5,
+          "h": 32
+        }
+      },
+      {
+        "name": "Toggle the task panel",
+        "rect": {
+          "x": 2168.15625,
+          "y": 7.5,
+          "w": 87.84375,
+          "h": 32
+        }
+      },
+      {
+        "name": "More actions",
+        "rect": {
+          "x": 2272,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 2323.953125,
+      "y": 10,
+      "w": 200.046875,
+      "h": 28
+    },
+    "islandText": "Needs you 3Next",
+    "toast": {
+      "x": 2258.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.530663 0.0339187 -0.206729 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1652.578125,
+      "y": 7.5,
+      "w": 201.875,
+      "h": 32
+    },
+    "hit": {
+      "[data-new-task]": true,
+      "[data-new-agent]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true,
+      "[data-account-switch-engine] > button": true
+    },
+    "texts": "harbor-ledger-serviceClaudeMainCodexMain5 workingHidden 2BoardConversationsTaskAgentOrchestratorTasks7",
+    "overflow": 0,
+    "tier": "wide",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      },
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      }
+    ],
+    "hidden": "Hidden 2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      8,
+      8,
+      16,
+      384.5,
+      16,
+      8,
+      16,
+      8,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 19.953125,
+    "hover": {
+      "before": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(230, 230, 234)"
+      },
+      "hovered": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(201, 201, 209)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 117
+      },
+      "rows": [
+        {
+          "label": "Search your messages (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Search your messages (/)Mute sound notificationsSound levels"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 408.96875,
+        "y": 47.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1652.578125,
+        "y": 7.5,
+        "w": 201.875,
+        "h": 32
+      },
+      "texts": "harbor-ledger-serviceClaudeMainCodexMain22 branches running · 22 treesSearch your messages (/)BoardConversationsTaskAgentOrchestratorTasks7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Search your messages (/)",
+        "findTruncated": false,
+        "status": "22 branches running · 22 trees",
+        "statusTruncated": false
+      },
+      "islandClearance": 19.953125
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 2292,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 19.953125,
+      "toast": {
+        "x": 2258.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": false
+          },
+          {
+            "label": "all",
+            "ok": false
+          },
+          {
+            "label": "Close the task panel",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": true
+          },
+          {
+            "label": "all",
+            "ok": true
+          },
+          {
+            "label": "Close the task panel",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "2540-en-light:quiet": {
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Archive",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Delete project from disk",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Mute sound notificationsSound levels Archive Delete project from disk"
+    }
+  },
+  "2540-en-dark": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 2292,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "Claude accounts — switch or add — Main",
+        "rect": {
+          "x": 408.96875,
+          "y": 7.5,
+          "w": 114.96875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Codex accounts — switch or add — Main",
+        "rect": {
+          "x": 531.9375,
+          "y": 7.5,
+          "w": 111.75,
+          "h": 32
+        }
+      },
+      {
+        "name": "5 working",
+        "rect": {
+          "x": 659.6875,
+          "y": 14.796875,
+          "w": 65.359375,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Find a task",
+        "rect": {
+          "x": 1109.3125,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 hidden tasks and conversations",
+        "rect": {
+          "x": 1545.3125,
+          "y": 7.5,
+          "w": 99.265625,
+          "h": 32
+        }
+      },
+      {
+        "name": "BoardConversations",
+        "rect": {
+          "x": 1652.578125,
+          "y": 7.5,
+          "w": 201.875,
+          "h": 32
+        }
+      },
+      {
+        "name": "New task",
+        "rect": {
+          "x": 1870.453125,
+          "y": 7.5,
+          "w": 70.203125,
+          "h": 32
+        }
+      },
+      {
+        "name": "New conversation with an agent",
+        "rect": {
+          "x": 1948.65625,
+          "y": 7.5,
+          "w": 80,
+          "h": 32
+        }
+      },
+      {
+        "name": "Orchestrator panel",
+        "rect": {
+          "x": 2044.65625,
+          "y": 7.5,
+          "w": 115.5,
+          "h": 32
+        }
+      },
+      {
+        "name": "Toggle the task panel",
+        "rect": {
+          "x": 2168.15625,
+          "y": 7.5,
+          "w": 87.84375,
+          "h": 32
+        }
+      },
+      {
+        "name": "More actions",
+        "rect": {
+          "x": 2272,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 2323.953125,
+      "y": 10,
+      "w": 200.046875,
+      "h": 28
+    },
+    "islandText": "Needs you 3Next",
+    "toast": {
+      "x": 2258.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.686886 0.0401993 -0.166043 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1652.578125,
+      "y": 7.5,
+      "w": 201.875,
+      "h": 32
+    },
+    "hit": {
+      "[data-new-task]": true,
+      "[data-new-agent]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true,
+      "[data-account-switch-engine] > button": true
+    },
+    "texts": "harbor-ledger-serviceClaudeMainCodexMain5 workingHidden 2BoardConversationsTaskAgentOrchestratorTasks7",
+    "overflow": 0,
+    "tier": "wide",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      },
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      }
+    ],
+    "hidden": "Hidden 2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      8,
+      8,
+      16,
+      384.5,
+      16,
+      8,
+      16,
+      8,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 19.953125,
+    "hover": {
+      "before": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(38, 38, 46)"
+      },
+      "hovered": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(58, 58, 68)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 117
+      },
+      "rows": [
+        {
+          "label": "Search your messages (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Search your messages (/)Mute sound notificationsSound levels"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 408.96875,
+        "y": 47.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1652.578125,
+        "y": 7.5,
+        "w": 201.875,
+        "h": 32
+      },
+      "texts": "harbor-ledger-serviceClaudeMainCodexMain22 branches running · 22 treesSearch your messages (/)BoardConversationsTaskAgentOrchestratorTasks7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Search your messages (/)",
+        "findTruncated": false,
+        "status": "22 branches running · 22 trees",
+        "statusTruncated": false
+      },
+      "islandClearance": 19.953125
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 2292,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 19.953125,
+      "toast": {
+        "x": 2258.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": false
+          },
+          {
+            "label": "all",
+            "ok": false
+          },
+          {
+            "label": "Close the task panel",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": true
+          },
+          {
+            "label": "all",
+            "ok": true
+          },
+          {
+            "label": "Close the task panel",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "2540-en-dark:quiet": {
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Archive",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Delete project from disk",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Mute sound notificationsSound levels Archive Delete project from disk"
+    }
+  },
+  "2540-uk-light": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 2292,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "Акаунти Claude — змінити або додати — Main",
+        "rect": {
+          "x": 408.96875,
+          "y": 7.5,
+          "w": 114.96875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Акаунти Codex — змінити або додати — Main",
+        "rect": {
+          "x": 531.9375,
+          "y": 7.5,
+          "w": 111.75,
+          "h": 32
+        }
+      },
+      {
+        "name": "5 працюють",
+        "rect": {
+          "x": 659.6875,
+          "y": 14.796875,
+          "w": 80.53125,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Знайти задачу",
+        "rect": {
+          "x": 1085.203125,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 приховані задачі чи розмови",
+        "rect": {
+          "x": 1521.203125,
+          "y": 7.5,
+          "w": 118.984375,
+          "h": 32
+        }
+      },
+      {
+        "name": "ДошкаРозмови",
+        "rect": {
+          "x": 1648.1875,
+          "y": 7.5,
+          "w": 180.578125,
+          "h": 32
+        }
+      },
+      {
+        "name": "Нова задача",
+        "rect": {
+          "x": 1844.765625,
+          "y": 7.5,
+          "w": 86.171875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Нова розмова з агентом",
+        "rect": {
+          "x": 1938.9375,
+          "y": 7.5,
+          "w": 78.265625,
+          "h": 32
+        }
+      },
+      {
+        "name": "Панель оркестратора",
+        "rect": {
+          "x": 2033.203125,
+          "y": 7.5,
+          "w": 119.28125,
+          "h": 32
+        }
+      },
+      {
+        "name": "Показати або сховати панель задач",
+        "rect": {
+          "x": 2160.484375,
+          "y": 7.5,
+          "w": 95.515625,
+          "h": 32
+        }
+      },
+      {
+        "name": "Більше дій",
+        "rect": {
+          "x": 2272,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 2334.484375,
+      "y": 10,
+      "w": 189.515625,
+      "h": 28
+    },
+    "islandText": "Чекають 3Далі",
+    "toast": {
+      "x": 2258.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.530663 0.0339187 -0.206729 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1648.1875,
+      "y": 7.5,
+      "w": 180.578125,
+      "h": 32
+    },
+    "hit": {
+      "[data-new-task]": true,
+      "[data-new-agent]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true,
+      "[data-account-switch-engine] > button": true
+    },
+    "texts": "harbor-ledger-serviceClaudeMainCodexMain5 працюютьПриховані 2ДошкаРозмовиЗадачаАгентОркестраторЗадачі7",
+    "overflow": 0,
+    "tier": "wide",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      },
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      }
+    ],
+    "hidden": "Приховані 2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      8,
+      8,
+      16,
+      345,
+      16,
+      8,
+      16,
+      8,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 30.484375,
+    "hover": {
+      "before": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(230, 230, 234)"
+      },
+      "hovered": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(201, 201, 209)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 117
+      },
+      "rows": [
+        {
+          "label": "Пошук моїх повідомлень (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Пошук моїх повідомлень (/)Вимкнути звукові сповіщенняРівні звуку"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 408.96875,
+        "y": 47.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1648.1875,
+        "y": 7.5,
+        "w": 180.578125,
+        "h": 32
+      },
+      "texts": "harbor-ledger-serviceClaudeMainCodexMain22 гілки працюють · 22 дереваПошук моїх повідомлень (/)ДошкаРозмовиЗадачаАгентОркестраторЗадачі7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Пошук моїх повідомлень (/)",
+        "findTruncated": false,
+        "status": "22 гілки працюють · 22 дерева",
+        "statusTruncated": false
+      },
+      "islandClearance": 30.484375
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 2292,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 30.484375,
+      "toast": {
+        "x": 2258.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": false
+          },
+          {
+            "label": "всі",
+            "ok": false
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": true
+          },
+          {
+            "label": "всі",
+            "ok": true
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "2540-uk-light:quiet": {
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "В архів",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Видалити проєкт з диска",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Вимкнути звукові сповіщенняРівні звуку В архів Видалити проєкт з диска"
+    }
+  },
+  "2540-uk-dark": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 2292,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "Акаунти Claude — змінити або додати — Main",
+        "rect": {
+          "x": 408.96875,
+          "y": 7.5,
+          "w": 114.96875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Акаунти Codex — змінити або додати — Main",
+        "rect": {
+          "x": 531.9375,
+          "y": 7.5,
+          "w": 111.75,
+          "h": 32
+        }
+      },
+      {
+        "name": "5 працюють",
+        "rect": {
+          "x": 659.6875,
+          "y": 14.796875,
+          "w": 80.53125,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Знайти задачу",
+        "rect": {
+          "x": 1085.203125,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 приховані задачі чи розмови",
+        "rect": {
+          "x": 1521.203125,
+          "y": 7.5,
+          "w": 118.984375,
+          "h": 32
+        }
+      },
+      {
+        "name": "ДошкаРозмови",
+        "rect": {
+          "x": 1648.1875,
+          "y": 7.5,
+          "w": 180.578125,
+          "h": 32
+        }
+      },
+      {
+        "name": "Нова задача",
+        "rect": {
+          "x": 1844.765625,
+          "y": 7.5,
+          "w": 86.171875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Нова розмова з агентом",
+        "rect": {
+          "x": 1938.9375,
+          "y": 7.5,
+          "w": 78.265625,
+          "h": 32
+        }
+      },
+      {
+        "name": "Панель оркестратора",
+        "rect": {
+          "x": 2033.203125,
+          "y": 7.5,
+          "w": 119.28125,
+          "h": 32
+        }
+      },
+      {
+        "name": "Показати або сховати панель задач",
+        "rect": {
+          "x": 2160.484375,
+          "y": 7.5,
+          "w": 95.515625,
+          "h": 32
+        }
+      },
+      {
+        "name": "Більше дій",
+        "rect": {
+          "x": 2272,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 2334.484375,
+      "y": 10,
+      "w": 189.515625,
+      "h": 28
+    },
+    "islandText": "Чекають 3Далі",
+    "toast": {
+      "x": 2258.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.686886 0.0401993 -0.166043 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1648.1875,
+      "y": 7.5,
+      "w": 180.578125,
+      "h": 32
+    },
+    "hit": {
+      "[data-new-task]": true,
+      "[data-new-agent]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true,
+      "[data-account-switch-engine] > button": true
+    },
+    "texts": "harbor-ledger-serviceClaudeMainCodexMain5 працюютьПриховані 2ДошкаРозмовиЗадачаАгентОркестраторЗадачі7",
+    "overflow": 0,
+    "tier": "wide",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      },
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      }
+    ],
+    "hidden": "Приховані 2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      8,
+      8,
+      16,
+      345,
+      16,
+      8,
+      16,
+      8,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 30.484375,
+    "hover": {
+      "before": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(38, 38, 46)"
+      },
+      "hovered": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(58, 58, 68)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 117
+      },
+      "rows": [
+        {
+          "label": "Пошук моїх повідомлень (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Пошук моїх повідомлень (/)Вимкнути звукові сповіщенняРівні звуку"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 408.96875,
+        "y": 47.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1648.1875,
+        "y": 7.5,
+        "w": 180.578125,
+        "h": 32
+      },
+      "texts": "harbor-ledger-serviceClaudeMainCodexMain22 гілки працюють · 22 дереваПошук моїх повідомлень (/)ДошкаРозмовиЗадачаАгентОркестраторЗадачі7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Пошук моїх повідомлень (/)",
+        "findTruncated": false,
+        "status": "22 гілки працюють · 22 дерева",
+        "statusTruncated": false
+      },
+      "islandClearance": 30.484375
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 2292,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 30.484375,
+      "toast": {
+        "x": 2258.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": false
+          },
+          {
+            "label": "всі",
+            "ok": false
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 2260,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": true
+          },
+          {
+            "label": "всі",
+            "ok": true
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "2540-uk-dark:quiet": {
+    "menu": {
+      "rect": {
+        "x": 2048,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "В архів",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Видалити проєкт з диска",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Вимкнути звукові сповіщенняРівні звуку В архів Видалити проєкт з диска"
+    }
+  },
+  "1850-en-light:create": [
+    "New task",
+    "New conversation with an agent"
+  ],
+  "1850-en-light": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1602,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 working",
+        "rect": {
+          "x": 416.96875,
+          "y": 14.796875,
+          "w": 65.359375,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Find a task",
+        "rect": {
+          "x": 836.0625,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 hidden tasks and conversations",
+        "rect": {
+          "x": 1272.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 1333.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Create",
+        "rect": {
+          "x": 1415.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Orchestrator panel",
+        "rect": {
+          "x": 1463.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Toggle the task panel",
+        "rect": {
+          "x": 1512.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "More actions",
+        "rect": {
+          "x": 1582,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1633.953125,
+      "y": 10,
+      "w": 200.046875,
+      "h": 28
+    },
+    "islandText": "Needs you 3Next",
+    "toast": {
+      "x": 1568.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.530663 0.0339187 -0.206729 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1333.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 working27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      353.5,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 19.953125,
+    "hover": {
+      "before": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(230, 230, 234)"
+      },
+      "hovered": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(201, 201, 209)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Search your messages (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Claude accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Codex accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Search your messages (/)ClaudeMainCodexMainMute sound notificationsSound levels"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 1363,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1333.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 branches runningSearch7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Search",
+        "findTruncated": false,
+        "status": "22 branches running",
+        "statusTruncated": false
+      },
+      "islandClearance": 19.953125
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1602,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 19.953125,
+      "toast": {
+        "x": 1568.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": false
+          },
+          {
+            "label": "all",
+            "ok": false
+          },
+          {
+            "label": "Close the task panel",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": true
+          },
+          {
+            "label": "all",
+            "ok": true
+          },
+          {
+            "label": "Close the task panel",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1850-en-light:quiet": {
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Archive",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Delete project from disk",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Mute sound notificationsSound levels Archive Delete project from disk"
+    }
+  },
+  "1850-en-dark:create": [
+    "New task",
+    "New conversation with an agent"
+  ],
+  "1850-en-dark": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1602,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 working",
+        "rect": {
+          "x": 416.96875,
+          "y": 14.796875,
+          "w": 65.359375,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Find a task",
+        "rect": {
+          "x": 836.0625,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 hidden tasks and conversations",
+        "rect": {
+          "x": 1272.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 1333.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Create",
+        "rect": {
+          "x": 1415.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Orchestrator panel",
+        "rect": {
+          "x": 1463.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Toggle the task panel",
+        "rect": {
+          "x": 1512.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "More actions",
+        "rect": {
+          "x": 1582,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1633.953125,
+      "y": 10,
+      "w": 200.046875,
+      "h": 28
+    },
+    "islandText": "Needs you 3Next",
+    "toast": {
+      "x": 1568.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.686886 0.0401993 -0.166043 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1333.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 working27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      353.5,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 19.953125,
+    "hover": {
+      "before": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(38, 38, 46)"
+      },
+      "hovered": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(58, 58, 68)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Search your messages (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Claude accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Codex accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Search your messages (/)ClaudeMainCodexMainMute sound notificationsSound levels"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 1363,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1333.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 branches runningSearch7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Search",
+        "findTruncated": false,
+        "status": "22 branches running",
+        "statusTruncated": false
+      },
+      "islandClearance": 19.953125
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1602,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 19.953125,
+      "toast": {
+        "x": 1568.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": false
+          },
+          {
+            "label": "all",
+            "ok": false
+          },
+          {
+            "label": "Close the task panel",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": true
+          },
+          {
+            "label": "all",
+            "ok": true
+          },
+          {
+            "label": "Close the task panel",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1850-en-dark:quiet": {
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Archive",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Delete project from disk",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Mute sound notificationsSound levels Archive Delete project from disk"
+    }
+  },
+  "1850-uk-light:create": [
+    "Нова задача",
+    "Нова розмова з агентом"
+  ],
+  "1850-uk-light": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1602,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 працюють",
+        "rect": {
+          "x": 416.96875,
+          "y": 14.796875,
+          "w": 80.53125,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Знайти задачу",
+        "rect": {
+          "x": 836.0625,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 приховані задачі чи розмови",
+        "rect": {
+          "x": 1272.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 1333.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Створити",
+        "rect": {
+          "x": 1415.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Панель оркестратора",
+        "rect": {
+          "x": 1463.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Показати або сховати панель задач",
+        "rect": {
+          "x": 1512.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Більше дій",
+        "rect": {
+          "x": 1582,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1644.484375,
+      "y": 10,
+      "w": 189.515625,
+      "h": 28
+    },
+    "islandText": "Чекають 3Далі",
+    "toast": {
+      "x": 1568.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.530663 0.0339187 -0.206729 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1333.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 працюють27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      338.5,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 30.484375,
+    "hover": {
+      "before": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(230, 230, 234)"
+      },
+      "hovered": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(201, 201, 209)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Пошук моїх повідомлень (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Claude — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Codex — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Пошук моїх повідомлень (/)ClaudeMainCodexMainВимкнути звукові сповіщенняРівні звуку"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 1363,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1333.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 гілки працюютьПошук7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Пошук",
+        "findTruncated": false,
+        "status": "22 гілки працюють",
+        "statusTruncated": false
+      },
+      "islandClearance": 30.484375
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1602,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 30.484375,
+      "toast": {
+        "x": 1568.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": false
+          },
+          {
+            "label": "всі",
+            "ok": false
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": true
+          },
+          {
+            "label": "всі",
+            "ok": true
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1850-uk-light:quiet": {
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "В архів",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Видалити проєкт з диска",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Вимкнути звукові сповіщенняРівні звуку В архів Видалити проєкт з диска"
+    }
+  },
+  "1850-uk-dark:create": [
+    "Нова задача",
+    "Нова розмова з агентом"
+  ],
+  "1850-uk-dark": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1602,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 136.96875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 працюють",
+        "rect": {
+          "x": 416.96875,
+          "y": 14.796875,
+          "w": 80.53125,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Знайти задачу",
+        "rect": {
+          "x": 836.0625,
+          "y": 7.5,
+          "w": 420,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 приховані задачі чи розмови",
+        "rect": {
+          "x": 1272.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 1333.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Створити",
+        "rect": {
+          "x": 1415.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Панель оркестратора",
+        "rect": {
+          "x": 1463.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Показати або сховати панель задач",
+        "rect": {
+          "x": 1512.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Більше дій",
+        "rect": {
+          "x": 1582,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1644.484375,
+      "y": 10,
+      "w": 189.515625,
+      "h": 28
+    },
+    "islandText": "Чекають 3Далі",
+    "toast": {
+      "x": 1568.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.686886 0.0401993 -0.166043 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 1333.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 працюють27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 136.96875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      338.5,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 30.484375,
+    "hover": {
+      "before": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(38, 38, 46)"
+      },
+      "hovered": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(58, 58, 68)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Пошук моїх повідомлень (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Claude — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Codex — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Пошук моїх повідомлень (/)ClaudeMainCodexMainВимкнути звукові сповіщенняРівні звуку"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 1363,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 1333.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 гілки працюютьПошук7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 136.96875,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Пошук",
+        "findTruncated": false,
+        "status": "22 гілки працюють",
+        "statusTruncated": false
+      },
+      "islandClearance": 30.484375
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1602,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 30.484375,
+      "toast": {
+        "x": 1568.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": false
+          },
+          {
+            "label": "всі",
+            "ok": false
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1570,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": true
+          },
+          {
+            "label": "всі",
+            "ok": true
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1850-uk-dark:quiet": {
+    "menu": {
+      "rect": {
+        "x": 1358,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "В архів",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Видалити проєкт з диска",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Вимкнути звукові сповіщенняРівні звуку В архів Видалити проєкт з диска"
+    }
+  },
+  "1280-en-light:create": [
+    "New task",
+    "New conversation with an agent"
+  ],
+  "1280-en-light": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1032,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 132.421875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 working",
+        "rect": {
+          "x": 412.421875,
+          "y": 14.796875,
+          "w": 65.359375,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Find a task",
+        "rect": {
+          "x": 509.78125,
+          "y": 7.5,
+          "w": 176.28125,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 hidden tasks and conversations",
+        "rect": {
+          "x": 702.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 763.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Create",
+        "rect": {
+          "x": 845.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Orchestrator panel",
+        "rect": {
+          "x": 893.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Toggle the task panel",
+        "rect": {
+          "x": 942.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "More actions",
+        "rect": {
+          "x": 1012,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1063.953125,
+      "y": 10,
+      "w": 200.046875,
+      "h": 28
+    },
+    "islandText": "Needs you 3Next",
+    "toast": {
+      "x": 998.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.530663 0.0339187 -0.206729 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 763.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 working27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 132.421875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      32,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 19.953125,
+    "hover": {
+      "before": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(230, 230, 234)"
+      },
+      "hovered": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(201, 201, 209)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Search your messages (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Claude accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Codex accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Search your messages (/)ClaudeMainCodexMainMute sound notificationsSound levels"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 793,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 763.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 branches runningSearch7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 133.328125,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Search",
+        "findTruncated": false,
+        "status": "22 branches running",
+        "statusTruncated": false
+      },
+      "islandClearance": 19.953125
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1032,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 19.953125,
+      "toast": {
+        "x": 998.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": false
+          },
+          {
+            "label": "all",
+            "ok": false
+          },
+          {
+            "label": "Close the task panel",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": true
+          },
+          {
+            "label": "all",
+            "ok": true
+          },
+          {
+            "label": "Close the task panel",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1280-en-light:quiet": {
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Archive",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Delete project from disk",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Mute sound notificationsSound levels Archive Delete project from disk"
+    }
+  },
+  "1280-en-dark:create": [
+    "New task",
+    "New conversation with an agent"
+  ],
+  "1280-en-dark": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1032,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 132.421875,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 working",
+        "rect": {
+          "x": 412.421875,
+          "y": 14.796875,
+          "w": 65.359375,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Find a task",
+        "rect": {
+          "x": 509.78125,
+          "y": 7.5,
+          "w": 176.28125,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 hidden tasks and conversations",
+        "rect": {
+          "x": 702.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 763.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Create",
+        "rect": {
+          "x": 845.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Orchestrator panel",
+        "rect": {
+          "x": 893.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Toggle the task panel",
+        "rect": {
+          "x": 942.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "More actions",
+        "rect": {
+          "x": 1012,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1063.953125,
+      "y": 10,
+      "w": 200.046875,
+      "h": 28
+    },
+    "islandText": "Needs you 3Next",
+    "toast": {
+      "x": 998.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.686886 0.0401993 -0.166043 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 763.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 working27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 132.421875,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      32,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 19.953125,
+    "hover": {
+      "before": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(38, 38, 46)"
+      },
+      "hovered": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(58, 58, 68)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Search your messages (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Claude accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Codex accounts — switch or add — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Search your messages (/)ClaudeMainCodexMainMute sound notificationsSound levels"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 793,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 763.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 branches runningSearch7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 133.328125,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Search",
+        "findTruncated": false,
+        "status": "22 branches running",
+        "statusTruncated": false
+      },
+      "islandClearance": 19.953125
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1032,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 19.953125,
+      "toast": {
+        "x": 998.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": false
+          },
+          {
+            "label": "all",
+            "ok": false
+          },
+          {
+            "label": "Close the task panel",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "this project",
+            "ok": true
+          },
+          {
+            "label": "all",
+            "ok": true
+          },
+          {
+            "label": "Close the task panel",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1280-en-dark:quiet": {
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Mute sound notifications",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Sound levels",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Archive",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Delete project from disk",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Mute sound notificationsSound levels Archive Delete project from disk"
+    }
+  },
+  "1280-uk-light:create": [
+    "Нова задача",
+    "Нова розмова з агентом"
+  ],
+  "1280-uk-light": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1032,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 131.40625,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 працюють",
+        "rect": {
+          "x": 411.40625,
+          "y": 14.796875,
+          "w": 80.53125,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Знайти задачу",
+        "rect": {
+          "x": 523.9375,
+          "y": 7.5,
+          "w": 162.125,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 приховані задачі чи розмови",
+        "rect": {
+          "x": 702.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 763.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Створити",
+        "rect": {
+          "x": 845.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Панель оркестратора",
+        "rect": {
+          "x": 893.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Показати або сховати панель задач",
+        "rect": {
+          "x": 942.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Більше дій",
+        "rect": {
+          "x": 1012,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1074.484375,
+      "y": 10,
+      "w": 189.515625,
+      "h": 28
+    },
+    "islandText": "Чекають 3Далі",
+    "toast": {
+      "x": 998.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.530663 0.0339187 -0.206729 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 763.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 працюють27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(28, 28, 34)",
+        "textColor": "rgb(28, 28, 34)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 131.40625,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      32,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 30.484375,
+    "hover": {
+      "before": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(230, 230, 234)"
+      },
+      "hovered": {
+        "color": "rgb(28, 28, 34)",
+        "border": "rgb(201, 201, 209)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Пошук моїх повідомлень (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Claude — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Codex — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Пошук моїх повідомлень (/)ClaudeMainCodexMainВимкнути звукові сповіщенняРівні звуку"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 793,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 763.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 гілки працюютьПошук7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 133.65625,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Пошук",
+        "findTruncated": false,
+        "status": "22 гілки працюють",
+        "statusTruncated": false
+      },
+      "islandClearance": 30.484375
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1032,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 30.484375,
+      "toast": {
+        "x": 998.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": false
+          },
+          {
+            "label": "всі",
+            "ok": false
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": true
+          },
+          {
+            "label": "всі",
+            "ok": true
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1280-uk-light:quiet": {
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "В архів",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Видалити проєкт з диска",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Вимкнути звукові сповіщенняРівні звуку В архів Видалити проєкт з диска"
+    }
+  },
+  "1280-uk-dark:create": [
+    "Нова задача",
+    "Нова розмова з агентом"
+  ],
+  "1280-uk-dark": {
+    "bars": 1,
+    "bar": {
+      "x": 248,
+      "y": 0,
+      "w": 1032,
+      "h": 48
+    },
+    "controls": [
+      {
+        "name": "harbor-ledger-service",
+        "rect": {
+          "x": 264,
+          "y": 13.71875,
+          "w": 131.40625,
+          "h": 19.5625
+        }
+      },
+      {
+        "name": "5 працюють",
+        "rect": {
+          "x": 411.40625,
+          "y": 14.796875,
+          "w": 80.53125,
+          "h": 17.390625
+        }
+      },
+      {
+        "name": "Знайти задачу",
+        "rect": {
+          "x": 523.9375,
+          "y": 7.5,
+          "w": 162.125,
+          "h": 32
+        }
+      },
+      {
+        "name": "2 приховані задачі чи розмови",
+        "rect": {
+          "x": 702.0625,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "DIV",
+        "rect": {
+          "x": 763.53125,
+          "y": 7.5,
+          "w": 66,
+          "h": 32
+        }
+      },
+      {
+        "name": "Створити",
+        "rect": {
+          "x": 845.53125,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      },
+      {
+        "name": "Панель оркестратора",
+        "rect": {
+          "x": 893.53125,
+          "y": 7.5,
+          "w": 41,
+          "h": 32
+        }
+      },
+      {
+        "name": "Показати або сховати панель задач",
+        "rect": {
+          "x": 942.53125,
+          "y": 7.5,
+          "w": 53.46875,
+          "h": 32
+        }
+      },
+      {
+        "name": "Більше дій",
+        "rect": {
+          "x": 1012,
+          "y": 7.5,
+          "w": 32,
+          "h": 32
+        }
+      }
+    ],
+    "island": {
+      "x": 1074.484375,
+      "y": 10,
+      "w": 189.515625,
+      "h": 28
+    },
+    "islandText": "Чекають 3Далі",
+    "toast": {
+      "x": 998.515625,
+      "y": 54,
+      "w": 265.484375,
+      "h": 62
+    },
+    "pressedFill": "oklab(0.686886 0.0401993 -0.166043 / 0.1)",
+    "otherFill": "rgba(0, 0, 0, 0)",
+    "switchRect": {
+      "x": 763.53125,
+      "y": 7.5,
+      "w": 66,
+      "h": 32
+    },
+    "hit": {
+      "[data-bar-create]": true,
+      "[data-bar-more]": true,
+      "[data-kanban-search]": true,
+      "[data-orchestrator-toggle]": true,
+      "[data-task-panel-toggle]": true,
+      "[data-hidden-pill]": true
+    },
+    "texts": "harbor-ledger-service5 працюють27",
+    "overflow": 0,
+    "tier": "narrow",
+    "plus": [
+      {
+        "svg": true,
+        "iconColor": "rgb(232, 232, 236)",
+        "textColor": "rgb(232, 232, 236)"
+      }
+    ],
+    "hidden": "2",
+    "name": {
+      "x": 264,
+      "y": 13.71875,
+      "w": 131.40625,
+      "h": 19.5625
+    },
+    "wrap": false,
+    "gaps": [
+      16,
+      32,
+      16,
+      8,
+      16,
+      16,
+      8,
+      16
+    ],
+    "islandClearance": 30.484375,
+    "hover": {
+      "before": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(38, 38, 46)"
+      },
+      "hovered": {
+        "color": "rgb(232, 232, 236)",
+        "border": "rgb(58, 58, 68)"
+      }
+    },
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 192
+      },
+      "rows": [
+        {
+          "label": "Пошук моїх повідомлень (/)",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Claude — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Акаунти Codex — змінити або додати — Main",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "search",
+          "ruled": false
+        },
+        {
+          "name": "accounts",
+          "ruled": true
+        },
+        {
+          "name": "sound",
+          "ruled": true
+        }
+      ],
+      "text": " Пошук моїх повідомлень (/)ClaudeMainCodexMainВимкнути звукові сповіщенняРівні звуку"
+    },
+    "accountsPanel": {
+      "rect": {
+        "x": 793,
+        "y": 129.5,
+        "w": 400,
+        "h": 600.21875
+      }
+    },
+    "conversations": {
+      "switchRect": {
+        "x": 763.53125,
+        "y": 7.5,
+        "w": 66,
+        "h": 32
+      },
+      "texts": "harbor-ledger-service22 гілки працюютьПошук7",
+      "name": {
+        "x": 264,
+        "y": 13.375,
+        "w": 133.65625,
+        "h": 20.25
+      },
+      "find": {
+        "find": "Пошук",
+        "findTruncated": false,
+        "status": "22 гілки працюють",
+        "statusTruncated": false
+      },
+      "islandClearance": 30.484375
+    },
+    "tasksOpen": {
+      "bar": {
+        "x": 248,
+        "y": 0,
+        "w": 1032,
+        "h": 48
+      },
+      "wrap": false,
+      "overflow": 0,
+      "islandClearance": 30.484375,
+      "toast": {
+        "x": 998.515625,
+        "y": 54,
+        "w": 265.484375,
+        "h": 62
+      },
+      "panelUnderToast": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": false
+          },
+          {
+            "label": "всі",
+            "ok": false
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": false
+          }
+        ]
+      },
+      "panel": {
+        "rect": {
+          "x": 1000,
+          "y": 48,
+          "w": 280,
+          "h": 852
+        },
+        "hit": [
+          {
+            "label": "цей проєкт",
+            "ok": true
+          },
+          {
+            "label": "всі",
+            "ok": true
+          },
+          {
+            "label": "Закрити панель задач",
+            "ok": true
+          }
+        ]
+      }
+    }
+  },
+  "1280-uk-dark:quiet": {
+    "menu": {
+      "rect": {
+        "x": 788,
+        "y": 43.5,
+        "w": 256,
+        "h": 151
+      },
+      "rows": [
+        {
+          "label": "Вимкнути звукові сповіщення",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Рівні звуку",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "В архів",
+          "h": 32,
+          "disabled": false
+        },
+        {
+          "label": "Видалити проєкт з диска",
+          "h": 32,
+          "disabled": false
+        }
+      ],
+      "groups": [
+        {
+          "name": "sound",
+          "ruled": false
+        },
+        {
+          "name": "project",
+          "ruled": true
+        }
+      ],
+      "text": "Вимкнути звукові сповіщенняРівні звуку В архів Видалити проєкт з диска"
+    }
+  },
+  "390-en-light": {
+    "h": 52,
+    "w": 390,
+    "text": "harbor-ledger-service3",
+    "targets": [
+      {
+        "w": 236.09375,
+        "h": 44
+      },
+      {
+        "w": 51.90625,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      }
+    ],
+    "desktopBars": 0,
+    "menuRows": [
+      "new-agent",
+      "new-task",
+      "new-pipeline",
+      "tasks",
+      "view-board",
+      "view-catalog",
+      "accounts",
+      "host"
+    ]
+  },
+  "390-en-dark": {
+    "h": 52,
+    "w": 390,
+    "text": "harbor-ledger-service3",
+    "targets": [
+      {
+        "w": 236.09375,
+        "h": 44
+      },
+      {
+        "w": 51.90625,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      }
+    ],
+    "desktopBars": 0,
+    "menuRows": [
+      "new-agent",
+      "new-task",
+      "new-pipeline",
+      "tasks",
+      "view-board",
+      "view-catalog",
+      "accounts",
+      "host"
+    ]
+  },
+  "390-uk-light": {
+    "h": 52,
+    "w": 390,
+    "text": "harbor-ledger-service3",
+    "targets": [
+      {
+        "w": 236.09375,
+        "h": 44
+      },
+      {
+        "w": 51.90625,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      }
+    ],
+    "desktopBars": 0,
+    "menuRows": [
+      "new-agent",
+      "new-task",
+      "new-pipeline",
+      "tasks",
+      "view-board",
+      "view-catalog",
+      "accounts",
+      "host"
+    ]
+  },
+  "390-uk-dark": {
+    "h": 52,
+    "w": 390,
+    "text": "harbor-ledger-service3",
+    "targets": [
+      {
+        "w": 236.09375,
+        "h": 44
+      },
+      {
+        "w": 51.90625,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      },
+      {
+        "w": 44,
+        "h": 44
+      }
+    ],
+    "desktopBars": 0,
+    "menuRows": [
+      "new-agent",
+      "new-task",
+      "new-pipeline",
+      "tasks",
+      "view-board",
+      "view-catalog",
+      "accounts",
+      "host"
+    ]
+  },
+  "failures": []
+}

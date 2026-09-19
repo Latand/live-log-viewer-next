@@ -249,7 +249,7 @@ test("the desktop offers only the Board and Conversations, and on the Board the 
   expect(Array.from(host.querySelectorAll(TOP_LEFT_CORNER))).toHaveLength(0);
 });
 
-test("the switch opens Conversations, floats alone in that corner there, and comes back to the Board", async () => {
+test("the switch opens Conversations, sits in that view's header bar there, and comes back to the Board", async () => {
   const host = mount();
   expect(await waitFor(() => host.querySelector("[data-kanban-board]") !== null)).toBe(true);
   await settle();
@@ -258,8 +258,9 @@ test("the switch opens Conversations, floats alone in that corner there, and com
   expect(await waitFor(() => host.querySelector("[data-desktop-conversations-scroll]") !== null)).toBe(true);
   await settle();
   expect(host.querySelector("[data-kanban-board]")).toBeNull();
-  expect(Array.from(host.querySelectorAll(TOP_LEFT_CORNER))).toHaveLength(1);
-  expect(tabsIn(host)!.className).toContain("absolute");
+  /* One header bar on every leaf (#1801): nothing floats over the list's corner. */
+  expect(Array.from(host.querySelectorAll(TOP_LEFT_CORNER))).toHaveLength(0);
+  expect(host.querySelector("[data-project-bar]")!.contains(tabsIn(host))).toBe(true);
   expect(viewTabs(host)).toEqual(["kanban", "list"]);
   expect(boards[PROJECT]!.prefs.viewMode).toBe("list");
 

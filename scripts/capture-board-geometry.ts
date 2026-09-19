@@ -7,6 +7,23 @@
  *
  *   bun run build && bun scripts/capture-board-geometry.ts
  *
+ * From a `git archive` export, set BOARD_CAPTURE_COMMIT to the exported SHA so
+ * the record names the commit it measured.
+ *
+ * With BOARD_CAPTURE_CASE=header it measures the project board's one header
+ * bar instead (#1801) on a home seeded the way production looks: three Claude
+ * accounts and one Codex account with usage readings, bound to the project;
+ * three questions waiting behind live processes; agents working; tasks off the
+ * board; a quiet second project. One 48 px bar, 32 px controls on an 8 / 16 px
+ * rhythm, nothing overlapping, the island inside the bar and non-zero, the
+ * pressed view segment painted differently, the switch in the same place on
+ * both views, hover that never takes the accent, no undo or redo anywhere, and
+ * ⋯ rules only between groups that drew a row, the last control 16 px clear of
+ * the island, and the same bar spanning the Tasks panel when it is open, with
+ * the panel's header clear of the island — at 2540, 1850 and 1280 px in en and
+ * uk, light and dark, under a 21-character project name — and the phone's 52 px
+ * bar in the same four.
+ *
  * Every reading is taken from the live DOM, and every input goes through
  * Playwright's Chromium input pipeline — real pointer clicks, real wheel,
  * real Control+wheel for the pinch path, real keyboard for the zoom keys, a
@@ -30,11 +47,17 @@ import { chromium, type Browser, type Page } from "playwright-core";
 import { createCaptureDirectory } from "./capture-directory";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
+/* The commit the record was captured from. A `git archive` export has no repository, so the caller
+   names it in BOARD_CAPTURE_COMMIT; inside a checkout it is HEAD. */
+const captureCommit = () => process.env.BOARD_CAPTURE_COMMIT?.trim()
+  || Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoRoot }).stdout.toString().trim();
 const BASE = createCaptureDirectory({ envName: "BOARD_CAPTURE_DIR", prefix: "llv-issue-1641", raw: process.env.BOARD_CAPTURE_DIR, repoRoot });
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const STATE_DIR = path.join(HOME, ".config", "agent-log-viewer", "state");
-const PROJECT_NAME = "harbor";
+/* The header case names its project like a real one (21 characters): a 6-letter name hid a
+   1280 px row that ran under the attention island (#1801). */
+const PROJECT_NAME = process.env.BOARD_CAPTURE_CASE === "header" ? "harbor-ledger-service" : "harbor";
 const REPO_DIR = path.join(HOME, "Projects", PROJECT_NAME);
 
 const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -159,6 +182,9 @@ function seedState(project: string, tasks: SeededTask[], reviewers: Seeded[]): v
   fs.writeFileSync(path.join(STATE_DIR, "flows.json"), JSON.stringify({ schemaVersion: 3, flows }, null, 2) + "\n", "utf8");
 }
 
+/** Server variables a case adds to the synthetic environment (the header case's Codex stub). */
+const SERVER_EXTRA_ENV: Record<string, string> = {};
+
 function buildEnvironment(port: number): NodeJS.ProcessEnv {
   const config = path.join(HOME, ".config");
   const inherited = { ...process.env };
@@ -180,6 +206,7 @@ function buildEnvironment(port: number): NodeJS.ProcessEnv {
     NEXT_TELEMETRY_DISABLED: "1",
     PORT: String(port),
     TZ: "UTC", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", USER: "demo", LOGNAME: "demo", SHELL: "/bin/sh",
+    ...SERVER_EXTRA_ENV,
   };
 }
 
@@ -483,7 +510,7 @@ async function main(): Promise<void> {
   const baseUrl = `http://127.0.0.1:${port}`;
   let server: ChildProcess | null = null;
   let browser: Browser | null = null;
-  const report: Record<string, unknown> = { commit: Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoRoot }).stdout.toString().trim() };
+  const report: Record<string, unknown> = { commit: captureCommit() };
   try {
     /* The project key is the scan's own. A throwaway boot names it; the
        state (tasks and the review flow) is then written and the server booted
@@ -1021,4 +1048,515 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+/* ------------------------------------------------------------------------- */
+/* The project board's one header bar (#1801, docs/design/board-header.md)     */
+/* ------------------------------------------------------------------------- */
+
+/* The quiet second project: nothing runs there, so its ⋯ menu shows Archive and Delete too. */
+const QUIET_NAME = "quay";
+const QUIET_DIR = path.join(HOME, "Projects", QUIET_NAME);
+const CODEX_STUB = path.join(BASE, "bin", "codex");
+/* Composed rather than written out: a literal UUID in a published source is what the privacy gate's rule catches. */
+const headerSession = (serial: number) => [String(serial).padStart(8, "0"), "1801", "4000", "8000", "0".repeat(12)].join("-");
+
+/**
+ * Three conversations parked on an AskUserQuestion. The scanner reports a
+ * pending question only for a transcript a live process holds open for
+ * writing (`pendingQuestionFor` needs `proc: running` and a pid), so each gets
+ * a holder: a `sleep` that inherits an append descriptor on the transcript.
+ * The caller stops each holder by the pid recorded here.
+ */
+function writeWaitingConversations(): ChildProcess[] {
+  const folder = path.join(HOME, ".claude/projects", projectSlug(REPO_DIR));
+  const questions = ["Which channel ships first?", "Keep the old endpoint for a release?", "Merge the two migrations?"];
+  return questions.map((question, index) => {
+    const id = headerSession(90 + index);
+    const stamp = new Date(Date.now() - (index + 1) * 60_000).toISOString();
+    const lines = [
+      { type: "user", uuid: `${id}-u1`, timestamp: stamp, cwd: REPO_DIR, sessionId: id, message: { role: "user", content: `Decide: ${question}` } },
+      { type: "assistant", uuid: `${id}-a1`, timestamp: stamp, cwd: REPO_DIR, sessionId: id, message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "tool_use", id: `toolu_1801_q${index}`, name: "AskUserQuestion", input: { questions: [{ question, header: "Decision", multiSelect: false, options: [{ label: "Yes", description: "Go ahead" }, { label: "No", description: "Hold" }] }] } }] } },
+    ];
+    const file = path.join(folder, `${id}.jsonl`);
+    fs.writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
+    return spawn("/bin/sh", ["-c", 'exec 3>>"$0"; exec sleep 3600', file], { stdio: "ignore" });
+  });
+}
+
+/** The quiet project: one finished conversation and nothing running. */
+function writeQuietProject(): void {
+  fs.mkdirSync(QUIET_DIR, { recursive: true });
+  const folder = path.join(HOME, ".claude/projects", projectSlug(QUIET_DIR));
+  fs.mkdirSync(folder, { recursive: true });
+  const id = headerSession(99);
+  const stamp = new Date(Date.now() - 3_600_000).toISOString();
+  const lines = [
+    { type: "user", uuid: `${id}-u1`, timestamp: stamp, cwd: QUIET_DIR, sessionId: id, message: { role: "user", content: "Tidy the docs index." } },
+    { type: "assistant", uuid: `${id}-a1`, timestamp: stamp, cwd: QUIET_DIR, sessionId: id, message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: "The index is tidy." }] } },
+    { type: "result", subtype: "success", uuid: `${id}-r1`, timestamp: stamp, cwd: QUIET_DIR, sessionId: id, is_error: false, duration_ms: 900, num_turns: 1, result: "The index is tidy." },
+  ];
+  const file = path.join(folder, `${id}.jsonl`);
+  fs.writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
+  /* Quiet for two hours: a transcript touched within the last half hour can read as a turn in
+     progress, and a live one stands Archive and Delete down. */
+  const quietSince = new Date(Date.now() - 2 * 3_600_000);
+  fs.utimesSync(file, quietSince, quietSince);
+}
+
+/** Two tasks with no conversation yet: off the board, so `Hidden` counts them. */
+function addOffBoardTasks(project: string): void {
+  const file = path.join(STATE_DIR, "tasks.json");
+  const store = JSON.parse(fs.readFileSync(file, "utf8")) as { tasks: Record<string, unknown>[] };
+  for (const [index, title] of ["Audit the retry budget", "Draft the rollback runbook"].entries()) {
+    store.tasks.push({
+      id: `task-1801-off-${index}`, project, status: "inbox", text: `${title}\nInvented fixture task with no conversation yet.`, placement: "unplaced",
+      assignments: [], createdAt: `2100-01-01T01:00:0${index}.000Z`, updatedAt: `2100-01-01T01:00:0${index}.000Z`,
+    });
+  }
+  fs.writeFileSync(file, JSON.stringify(store, null, 2) + "\n", "utf8");
+}
+
+/**
+ * Accounts as production has them, all invented: Claude «Main» (the home's
+ * own login) plus «Account B» and «Account C», Codex «Main», each with usage
+ * readings, written through the Viewer's own modules into the synthetic home
+ * and bound to the project so the header's account switches are the real
+ * route's answer. The account controller stays disabled so the readings stay,
+ * and the Codex binary is a stub, so nothing reaches a provider.
+ */
+async function seedAccounts(project: string): Promise<void> {
+  process.env.HOME = HOME;
+  process.env.XDG_CONFIG_HOME = path.join(HOME, ".config");
+  process.env.LLV_STATE_DIR = STATE_DIR;
+  process.env.LLV_CLAUDE_HOME = path.join(HOME, ".claude");
+  process.env.LLV_CODEX_HOME = path.join(HOME, ".codex");
+  fs.mkdirSync(path.dirname(CODEX_STUB), { recursive: true });
+  fs.writeFileSync(CODEX_STUB, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  SERVER_EXTRA_ENV.LLV_CODEX_BINARY = CODEX_STUB;
+  fs.writeFileSync(path.join(HOME, ".codex", "auth.json"), "{}", { mode: 0o600 });
+  fs.writeFileSync(path.join(HOME, ".claude", ".credentials.json"), "{}", { mode: 0o600 });
+
+  const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
+  const { bindAccountToProject } = await import("@/lib/accounts/projectBindings");
+  const { agentRegistry } = await import("@/lib/agent/registry");
+  const claudeB = createManagedClaudeAccount("Account B");
+  fs.writeFileSync(path.join(claudeB.home, ".credentials.json"), "{}", { mode: 0o600 });
+  const claudeC = createManagedClaudeAccount("Account C");
+  fs.writeFileSync(path.join(claudeC.home, ".credentials.json"), "{}", { mode: 0o600 });
+
+  const now = new Date();
+  const nowS = Math.floor(now.getTime() / 1000);
+  const at = now.toISOString();
+  const live = { source: "live" as const, reason: null, staleSince: null };
+  const window = (usedPercent: number, hours: number, windowMinutes: number) => ({ usedPercent, resetsAt: nowS + hours * 3_600, windowMinutes });
+  const claude = (accountId: string, session: number, weekly: number, plan: string) => ({
+    engine: "claude" as const, accountId, authenticated: true, authCheckedAt: at, observedAt: at, bootId: "capture", provenance: live,
+    limits: { session: window(session, 3, 300), weekly: window(weekly, 90, 10_080), plan, capturedAt: nowS },
+  });
+  agentRegistry().recordQuotaEvaluation({
+    engine: "claude",
+    observations: [claude("default", 34, 61, "max"), claude(claudeB.id, 12, 28, "max"), claude(claudeC.id, 71, 88, "pro")],
+    signature: null, bootId: "capture", now: at, minimumGapMs: 60_000,
+  });
+  agentRegistry().recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex", accountId: "default", authenticated: true, authCheckedAt: at, observedAt: at, bootId: "capture", provenance: live,
+      limits: { session: window(22, 2, 300), weekly: window(47, 70, 10_080), plan: "pro", capturedAt: nowS },
+      resetCredits: { availableCount: 0, expiresAt: null },
+    }],
+    signature: null, bootId: "capture", now: at, minimumGapMs: 60_000,
+  });
+  for (const [engine, accountId] of [["claude", "default"], ["claude", claudeB.id], ["codex", "default"]] as const) {
+    const result = bindAccountToProject(engine, accountId, project);
+    if (!result.ok) throw new Error(`binding ${engine} ${accountId} to the project failed: ${result.code}`);
+  }
+}
+
+interface HeaderReading {
+  bars: number;
+  bar: Rect | null;
+  controls: { name: string; rect: Rect }[];
+  island: Rect | null;
+  islandText: string;
+  toast: Rect | null;
+  pressedFill: string | null;
+  otherFill: string | null;
+  switchRect: Rect | null;
+  hit: Record<string, boolean>;
+  texts: string;
+  /** How far the bar's content runs past its box; 0 when everything fits in one row. */
+  overflow: number;
+  tier: string | null;
+  /** The `+` of the create controls: an icon in the control's own colour. */
+  plus: { svg: boolean; iconColor: string | null; textColor: string | null }[];
+  hidden: string | null;
+  /** The project name's box, visible or not. */
+  name: Rect | null;
+  /** Whether the bar is in its wrapping face (a bar under 768 px). */
+  wrap: boolean;
+}
+
+/** Runs inside the page: the header bar, its visible controls and the island, in viewport pixels. */
+function readHeader(): HeaderReading {
+  const rect = (element: Element): Rect => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; };
+  const visible = (element: Element) => { const r = element.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(element).visibility !== "hidden"; };
+  const bars = [...document.querySelectorAll("header.bar, [data-project-bar]")].filter(visible);
+  const bar = bars[0] ?? null;
+  const controls: { name: string; rect: Rect }[] = [];
+  if (bar) {
+    const named = (element: Element) => element.getAttribute("aria-label") || element.getAttribute("placeholder") || element.textContent?.trim() || element.tagName;
+    const selector = "[data-bar-control], .btn, input[type=search], [data-account-switch-engine] > button, h1, .summary, [data-bar-group=status]";
+    for (const element of bar.querySelectorAll(selector)) if (visible(element) && !element.closest("[data-bar-more-menu]")) controls.push({ name: named(element)!, rect: rect(element) });
+  }
+  controls.sort((a, b) => a.rect.x - b.rect.x);
+  const islandElement = document.querySelector("[data-attention-island]");
+  const toastElement = document.querySelector("[data-attention-toast]");
+  const tabs = [...document.querySelectorAll("button[data-view-tab]")];
+  const pressed = tabs.find((tab) => tab.getAttribute("aria-pressed") === "true");
+  const other = tabs.find((tab) => tab.getAttribute("aria-pressed") !== "true");
+  const hit: Record<string, boolean> = {};
+  for (const selector of ["[data-new-task]", "[data-new-agent]", "[data-bar-create]", "[data-bar-more]", "[data-kanban-search]", "[data-orchestrator-toggle]", "[data-task-panel-toggle]", "[data-hidden-pill]", "[data-account-switch-engine] > button"]) {
+    const element = document.querySelector(selector);
+    if (!element || !visible(element)) continue;
+    const r = element.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    hit[selector] = Boolean(top && (top === element || element.contains(top)));
+  }
+  const plus = [...document.querySelectorAll("[data-new-task], [data-new-agent], [data-bar-create]")].filter(visible).map((button) => {
+    const svg = button.querySelector("svg");
+    return { svg: svg !== null, iconColor: svg ? getComputedStyle(svg).color : null, textColor: getComputedStyle(button).color };
+  });
+  const hiddenPill = document.querySelector("[data-hidden-pill]");
+  const switchElement = document.querySelector("[data-project-view-tabs]");
+  return {
+    bars: bars.length,
+    bar: bar ? rect(bar) : null,
+    controls,
+    island: islandElement ? rect(islandElement) : null,
+    islandText: islandElement?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+    toast: toastElement && visible(toastElement) ? rect(toastElement) : null,
+    pressedFill: pressed ? getComputedStyle(pressed).backgroundColor : null,
+    otherFill: other ? getComputedStyle(other).backgroundColor : null,
+    switchRect: switchElement ? rect(switchElement) : null,
+    hit,
+    texts: bar?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+    overflow: bar ? Math.max(0, bar.scrollWidth - bar.clientWidth) : 0,
+    tier: bar?.getAttribute("data-bar-tier") ?? null,
+    plus,
+    hidden: hiddenPill && visible(hiddenPill) ? hiddenPill.textContent?.replace(/\s+/g, " ").trim() ?? "" : null,
+    name: bar?.querySelector("h1") ? rect(bar.querySelector("h1")!) : null,
+    wrap: bar?.hasAttribute("data-bar-wrap") ?? false,
+  };
+}
+
+/** Runs inside the page: the open Tasks panel's box and whether its header's controls take a click at their centres. */
+function readTaskPanel() {
+  const panel = document.querySelector("aside[data-task-panel]");
+  if (!panel) return null;
+  const r = panel.getBoundingClientRect();
+  const head = panel.firstElementChild;
+  const hit = [...(head?.querySelectorAll("button") ?? [])].map((button) => {
+    const box = button.getBoundingClientRect();
+    const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return { label: (button.getAttribute("aria-label") || button.textContent || "").trim(), ok: Boolean(top && (top === button || button.contains(top))) };
+  });
+  return { rect: { x: r.x, y: r.y, w: r.width, h: r.height }, hit };
+}
+
+/** The bar's last control ends before the island, with the 16 px between groups to spare. */
+function lastControlClear(tag: string, reading: HeaderReading, must: (ok: boolean, message: string) => void): number | null {
+  const last = reading.controls.reduce<{ name: string; rect: Rect } | null>((best, control) => (!best || control.rect.x + control.rect.w > best.rect.x + best.rect.w ? control : best), null);
+  if (!last || !reading.island) {
+    must(false, `${tag}: no last control or no island to measure against`);
+    return null;
+  }
+  const clearance = reading.island.x - (last.rect.x + last.rect.w);
+  must(clearance >= 16 - 0.5, `${tag}: «${last.name}» ends ${clearance.toFixed(1)}px before the island`);
+  return clearance;
+}
+
+/** Runs inside the page: the open ⋯ menu's rows, groups and rules. */
+function readMenu() {
+  const element = document.querySelector("[data-bar-more-menu]")!;
+  const r = element.getBoundingClientRect();
+  const shown = (node: Element) => { const box = node.getBoundingClientRect(); return box.width > 0 && box.height > 0; };
+  const rows = [...element.querySelectorAll("button")].filter(shown).map((button) => ({ label: (button.getAttribute("aria-label") || button.textContent || "").replace(/\s+/g, " ").trim(), h: button.getBoundingClientRect().height, disabled: (button as HTMLButtonElement).disabled }));
+  const groups = [...element.querySelectorAll(":scope > [data-bar-menu-group]")].filter(shown).map((group) => ({ name: group.getAttribute("data-bar-menu-group"), ruled: parseFloat(getComputedStyle(group).borderTopWidth) > 0 }));
+  return { rect: { x: r.x, y: r.y, w: r.width, h: r.height }, rows, groups, text: element.textContent ?? "" };
+}
+
+type MenuReading = ReturnType<typeof readMenu>;
+
+async function headerMain(): Promise<void> {
+  const { tasks, reviewers } = seedHome();
+  writeQuietProject();
+  const failures: string[] = [];
+  const must = (ok: boolean, message: string) => { if (!ok) failures.push(message); };
+  const port = 3_000 + (process.pid % 900);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let server: ChildProcess | null = null;
+  let browser: Browser | null = null;
+  const holders: ChildProcess[] = [];
+  const report: Record<string, unknown> = { commit: captureCommit() };
+  try {
+    server = startServer(port);
+    await waitForServer(baseUrl, server);
+    await waitForBoard(baseUrl, false);
+    const projects = await (async () => {
+      const deadline = Date.now() + 120_000;
+      while (Date.now() < deadline) {
+        const files = ((await (await fetch(`${baseUrl}/api/files`)).json()) as FilesPayload).files ?? [];
+        const of = (dir: string) => files.find((file) => file.path?.includes(projectSlug(dir)))?.project;
+        const busy = of(REPO_DIR);
+        const quiet = of(QUIET_DIR);
+        if (busy && quiet) return { busy, quiet };
+        await Bun.sleep(2_000);
+      }
+      throw new Error("the two seeded projects never scanned");
+    })();
+    const project = projects.busy;
+    await stop(server);
+    server = null;
+    fs.rmSync(STATE_DIR, { recursive: true, force: true });
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    seedState(project, tasks, reviewers);
+    addOffBoardTasks(project);
+    await seedAccounts(project);
+    holders.push(...writeWaitingConversations());
+    server = startServer(port);
+    await waitForServer(baseUrl, server);
+    await waitForBoard(baseUrl, true);
+    await Bun.sleep(4_000);
+    browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+
+    /* The labelled tier starts at 1700 px of bar (a 1948 px viewport with the rail): 2540 is wide,
+       and 1850 (1602 px of bar), where the uk labels did not fit, and 1280 are narrow. */
+    const cases = [2540, 1850, 1280].flatMap((width) => (["en", "uk"] as const).flatMap((lang) => (["light", "dark"] as const).map((colorScheme) => ({ width, lang, colorScheme }))));
+    for (const { width, lang, colorScheme } of cases) {
+      const tag = `${width}-${lang}-${colorScheme}`;
+      const wide = width >= 1948;
+      const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme, reducedMotion: "reduce" });
+      await context.addInitScript(seedInit);
+      await context.addInitScript((value: string) => localStorage.setItem("llv_lang", value), lang);
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/#p=${encodeURIComponent(project)}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+      await page.waitForSelector("[data-kanban-board] header.bar", { timeout: 120_000 });
+      await page.waitForFunction(() => /[1-9]/.test(document.querySelector("[data-attention-island]")?.textContent ?? ""), undefined, { timeout: 60_000 }).catch(() => {});
+      await page.waitForTimeout(2_500);
+      const reading = await page.evaluate(readHeader);
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}.png`), clip: { x: 0, y: 0, width, height: 120 } });
+      must(reading.bars === 1, `${tag}: ${reading.bars} header bars`);
+      must(reading.bar !== null && near(reading.bar.h, 48, 0.5), `${tag}: the bar is ${reading.bar?.h}px tall`);
+      must(reading.overflow <= 0.5, `${tag}: the bar's content runs ${reading.overflow}px past its box`);
+      must(reading.name !== null && reading.name.w >= 40, `${tag}: the project name is ${reading.name?.w ?? 0}px wide`);
+      must(reading.tier === (wide ? "wide" : "narrow"), `${tag}: the bar is in its ${reading.tier} tier`);
+      const islandClearance = lastControlClear(tag, reading, must);
+      for (const control of reading.controls) {
+        if (control.rect.h < 24) continue;
+        must(near(control.rect.h, 32, 0.5), `${tag}: «${control.name}» is ${control.rect.h}px tall`);
+      }
+      const boxes = [...reading.controls, ...(reading.island ? [{ name: "island", rect: reading.island }] : [])];
+      for (const [index, a] of boxes.entries()) for (const b of boxes.slice(index + 1)) {
+        if (a.rect.x <= b.rect.x && a.rect.x + a.rect.w >= b.rect.x + b.rect.w && a.rect.y <= b.rect.y && a.rect.y + a.rect.h >= b.rect.y + b.rect.h) continue;
+        if (b.rect.x <= a.rect.x && b.rect.x + b.rect.w >= a.rect.x + a.rect.w && b.rect.y <= a.rect.y && b.rect.y + b.rect.h >= a.rect.y + a.rect.h) continue;
+        must(!overlaps(a.rect, b.rect, 0.5), `${tag}: «${a.name}» and «${b.name}» overlap`);
+      }
+      /* The rhythm: edge to edge, 8 px inside a group and 16 px between groups; the one spacer is the only other gap. */
+      const gaps = reading.controls.slice(1).map((control, index) => Math.round((control.rect.x - (reading.controls[index]!.rect.x + reading.controls[index]!.rect.w)) * 2) / 2);
+      const offRhythm = gaps.filter((gap) => gap !== 8 && gap !== 16);
+      must(offRhythm.length === 1 && offRhythm[0]! > 16, `${tag}: gaps ${gaps.join(", ")} are not 8 / 16 around one spacer`);
+      must(reading.island !== null && reading.bar !== null && reading.island.y >= reading.bar.y && reading.island.y + reading.island.h <= reading.bar.y + reading.bar.h, `${tag}: the island is not inside the bar`);
+      must(/[1-9]/.test(reading.islandText), `${tag}: the island reads «${reading.islandText}», nothing waiting`);
+      must(reading.toast === null || (reading.bar !== null && reading.toast.y >= reading.bar.y + reading.bar.h + 4), `${tag}: the toast starts at y ${reading.toast?.y}, on the bar`);
+      must(reading.hidden !== null && /[1-9]/.test(reading.hidden), `${tag}: Hidden reads «${reading.hidden}»`);
+      must(wide || (reading.hidden !== null && /^\d+$/.test(reading.hidden)), `${tag}: narrow, Hidden reads «${reading.hidden}», not its icon and count`);
+      must(reading.pressedFill !== null && reading.pressedFill !== reading.otherFill, `${tag}: the pressed view segment paints ${reading.pressedFill}, the other ${reading.otherFill}`);
+      for (const [selector, ok] of Object.entries(reading.hit)) must(ok, `${tag}: ${selector} is covered at its centre`);
+      must(reading.plus.length > 0 && reading.plus.every((item) => item.svg && item.iconColor === item.textColor), `${tag}: a + is not an icon in its control's colour`);
+      const accountsInBar = reading.controls.filter((control) => /Claude|Codex/.test(control.name)).length;
+      must(wide ? accountsInBar === 2 : accountsInBar === 0, `${tag}: ${accountsInBar} account switches in the bar`);
+      must(!/undo|redo|скасувати|повторити/i.test(reading.texts), `${tag}: the bar still names undo or redo`);
+
+      /* Hover strengthens the border and leaves the label's colour alone. */
+      const tasksToggle = page.locator("[data-task-panel-toggle]");
+      const before = await tasksToggle.evaluate((element) => ({ color: getComputedStyle(element).color, border: getComputedStyle(element).borderTopColor }));
+      await tasksToggle.hover();
+      await page.waitForTimeout(250);
+      const hovered = await tasksToggle.evaluate((element) => ({ color: getComputedStyle(element).color, border: getComputedStyle(element).borderTopColor }));
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-hover.png`), clip: { x: 0, y: 0, width, height: 60 } });
+      must(hovered.color === before.color && hovered.border !== before.border, `${tag}: hover turns Tasks from ${JSON.stringify(before)} to ${JSON.stringify(hovered)}`);
+      await page.mouse.move(1, 700);
+
+      /* The accounts: in the bar when wide, as ⋯ rows when narrow; either opens the panel listing all three Claude accounts. */
+      let menu: MenuReading;
+      if (wide) {
+        await page.click('[data-account-switch-engine="claude"] > button');
+      } else {
+        await page.click("[data-bar-more]");
+        await page.waitForSelector("[data-bar-more-menu]");
+        menu = await page.evaluate(readMenu);
+        await page.click('[data-bar-more-menu] [data-account-switch-engine="claude"] > button');
+      }
+      await page.waitForTimeout(800);
+      const panel = await page.evaluate(() => {
+        const dialog = [...document.querySelectorAll('[role="dialog"]')].find((element) => /Claude/.test(element.getAttribute("aria-label") ?? ""));
+        if (!dialog) return null;
+        const r = dialog.getBoundingClientRect();
+        return { rect: { x: r.x, y: r.y, w: r.width, h: r.height }, text: dialog.textContent?.replace(/\s+/g, " ").trim() ?? "" };
+      });
+      if (panel) await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-accounts.png`), clip: { x: Math.max(0, panel.rect.x - 24), y: 0, width: Math.min(width - Math.max(0, panel.rect.x - 24), panel.rect.w + 48), height: Math.min(900, panel.rect.y + panel.rect.h + 16) } });
+      must(panel !== null && ["Main", "Account B", "Account C"].every((label) => panel.text.includes(label)) && /\d+\s?%/.test(panel.text), `${tag}: the Claude accounts panel does not list three accounts with usage`);
+      await page.keyboard.press("Escape");
+      await page.mouse.click(width / 2, 600);
+      await page.waitForTimeout(200);
+
+      /* The ⋯ menu on this busy project: Archive and Delete stand down while agents run, and no rule dangles. */
+      await page.click("[data-bar-more]");
+      await page.waitForSelector("[data-bar-more-menu]");
+      /* Narrow, the account rows arrive with their own read of the project's bindings. */
+      if (!wide) await page.waitForSelector('[data-bar-more-menu] [data-account-switch-engine="codex"]', { timeout: 15_000 }).catch(() => {});
+      menu = await page.evaluate(readMenu);
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-more.png`), clip: { x: Math.max(0, menu.rect.x - 40), y: 0, width: Math.min(width - Math.max(0, menu.rect.x - 40), menu.rect.w + 80), height: menu.rect.y + menu.rect.h + 16 } });
+      const checkMenu = (label: string, reading: MenuReading) => {
+        must(reading.rect.x + reading.rect.w <= width, `${label}: the ⋯ menu runs off the right edge`);
+        must(reading.groups.length > 0 && !reading.groups[0]!.ruled && reading.groups.slice(1).every((group) => group.ruled), `${label}: ⋯ rules ${JSON.stringify(reading.groups)}`);
+        must(!/undo|redo|скасувати|повторити/i.test(reading.text), `${label}: ⋯ still offers undo or redo`);
+        must(reading.rows.every((row) => near(row.h, 32, 0.5)), `${label}: a ⋯ row is not 32 px`);
+      };
+      checkMenu(tag, menu);
+      must(menu.rows.length >= (wide ? 3 : 5), `${tag}: the ⋯ menu holds ${menu.rows.length} rows`);
+      must(wide ? !menu.groups.some((group) => group.name === "accounts") : menu.groups.some((group) => group.name === "accounts"), `${tag}: the accounts rows are ${wide ? "repeated in" : "missing from"} ⋯`);
+      await page.keyboard.press("Escape");
+      await page.mouse.click(width / 2, 600);
+
+      if (!wide) {
+        await page.click("[data-bar-create]");
+        const createIcons = await page.evaluate(() => [...document.querySelectorAll('.menu[role="menu"] [role="menuitem"]')].every((item) => item.querySelector("svg") !== null));
+        must(createIcons, `${tag}: a + menu row has no icon`);
+        const create = await page.evaluate(() => [...document.querySelectorAll('.menu[role="menu"] [role="menuitem"]')].map((item) => item.textContent?.trim() ?? ""));
+        await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-create.png`), clip: { x: 0, y: 0, width, height: 200 } });
+        must(create.length === 2, `${tag}: the + menu offers ${create.length} rows`);
+        report[`${tag}:create`] = create;
+        await page.keyboard.press("Escape");
+        await page.mouse.click(width / 2, 600);
+      }
+
+      /* The view switch keeps its place on Conversations, whose bar has the message search in the find slot. */
+      await page.click('button[data-view-tab="list"]');
+      await page.waitForSelector("[data-project-bar]", { timeout: 60_000 });
+      await page.waitForTimeout(1_500);
+      const list = await page.evaluate(readHeader);
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-conversations.png`), clip: { x: 0, y: 0, width, height: 120 } });
+      must(list.bars === 1 && list.bar !== null && near(list.bar.h, 48, 0.5), `${tag}: the Conversations bar is ${list.bar?.h}px tall`);
+      /* Narrow, only the project name may truncate on Conversations: a short search label, the live count alone. */
+      const listTexts = await page.evaluate(() => {
+        const truncated = (element: Element | null) => Boolean(element && element.scrollWidth > element.clientWidth + 0.5);
+        const find = document.querySelector('[data-project-bar] [data-testid="dash-search"] span');
+        const status = document.querySelector('[data-project-bar] [data-bar-group="status"]');
+        return { find: find?.textContent ?? "", findTruncated: truncated(find), status: status?.textContent ?? "", statusTruncated: truncated(status) };
+      });
+      if (!wide) {
+        must(!listTexts.findTruncated && !listTexts.statusTruncated, `${tag}: Conversations truncates ${JSON.stringify(listTexts)}`);
+        must(!/\(\/\)/.test(listTexts.find), `${tag}: the narrow search label is the full «${listTexts.find}»`);
+      }
+      must(reading.switchRect !== null && list.switchRect !== null && near(reading.switchRect.x, list.switchRect.x, 0.5), `${tag}: the view switch moves from x ${reading.switchRect?.x} to ${list.switchRect?.x}`);
+      const listClearance = lastControlClear(`${tag} conversations`, list, must);
+      await page.click('button[data-view-tab="kanban"]');
+
+      /* The Tasks panel open on the Board: the bar spans it and stays one 48 px row, the island
+         lands on the bar, and the panel's own header takes clicks at every control. */
+      await page.waitForSelector("[data-kanban-board] header.bar", { timeout: 60_000 });
+      await page.click("[data-task-panel-toggle]");
+      await page.waitForSelector("aside[data-task-panel]", { timeout: 30_000 });
+      await page.waitForTimeout(1_000);
+      const open = await page.evaluate(readHeader);
+      /* The island's toast is a floating card, 360 px wide, that stays until dismissed; it lies over
+         whatever sits under the island, and a 280 px panel cannot avoid it. The island itself must
+         not cover the panel; with the toast dismissed, the panel's header takes every click. */
+      const underToast = await page.evaluate(readTaskPanel);
+      if (await page.locator("[data-attention-toast-dismiss]").count()) {
+        await page.click("[data-attention-toast-dismiss]");
+        await page.waitForTimeout(300);
+      }
+      const taskPanel = await page.evaluate(readTaskPanel);
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-tasks-open.png`), clip: { x: 0, y: 0, width, height: 160 } });
+      must(open.bars === 1 && open.bar !== null && near(open.bar.h, 48, 0.5) && !open.wrap, `${tag} tasks open: the bar is ${open.bar?.h}px tall${open.wrap ? ", wrapping" : ""}`);
+      must(open.bar !== null && near(open.bar.x + open.bar.w, width, 0.5), `${tag} tasks open: the bar ends at x ${open.bar ? open.bar.x + open.bar.w : null}, short of the panel's edge`);
+      must(open.overflow <= 0.5, `${tag} tasks open: the bar's content runs ${open.overflow}px past its box`);
+      const openClearance = lastControlClear(`${tag} tasks open`, open, must);
+      must(taskPanel !== null && open.bar !== null && taskPanel.rect.y >= open.bar.y + open.bar.h - 0.5, `${tag} tasks open: the panel starts at y ${taskPanel?.rect.y}, beside the bar`);
+      for (const item of taskPanel?.hit ?? []) must(item.ok, `${tag} tasks open: the panel's «${item.label}» is covered at its centre`);
+      must((taskPanel?.hit.length ?? 0) >= 3, `${tag} tasks open: the panel header shows ${taskPanel?.hit.length ?? 0} controls`);
+      for (const [selector, ok] of Object.entries(open.hit)) must(ok, `${tag} tasks open: ${selector} is covered at its centre`);
+      await page.click("[data-task-panel-toggle]");
+      report[tag] = { ...reading, gaps, islandClearance, hover: { before, hovered }, menu, accountsPanel: panel ? { rect: panel.rect } : null, conversations: { switchRect: list.switchRect, texts: list.texts, name: list.name, find: listTexts, islandClearance: listClearance }, tasksOpen: { bar: open.bar, wrap: open.wrap, overflow: open.overflow, islandClearance: openClearance, toast: open.toast, panelUnderToast: underToast, panel: taskPanel } };
+      await context.close();
+
+      /* The quiet project's ⋯: nothing runs there, so Archive and Delete show beside the rest. */
+      const quiet = await browser.newContext({ viewport: { width, height: 900 }, colorScheme, reducedMotion: "reduce" });
+      await quiet.addInitScript(seedInit);
+      await quiet.addInitScript((value: string) => localStorage.setItem("llv_lang", value), lang);
+      const quietPage = await quiet.newPage();
+      await quietPage.goto(`${baseUrl}/#p=${encodeURIComponent(projects.quiet)}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+      await quietPage.waitForSelector("[data-bar-more]", { timeout: 120_000 });
+      await quietPage.waitForTimeout(2_000);
+      await quietPage.click("[data-bar-more]");
+      await quietPage.waitForSelector("[data-bar-more-menu]");
+      const quietMenu = await quietPage.evaluate(readMenu);
+      await quietPage.screenshot({ path: path.join(OUT_DIR, `header-${tag}-quiet-more.png`), clip: { x: Math.max(0, quietMenu.rect.x - 40), y: 0, width: Math.min(width - Math.max(0, quietMenu.rect.x - 40), quietMenu.rect.w + 80), height: quietMenu.rect.y + quietMenu.rect.h + 16 } });
+      checkMenu(`${tag} quiet`, quietMenu);
+      /* Sound (two rows), Archive, Delete; this leaf's message search sits in the bar's find slot. */
+      must(quietMenu.groups.some((group) => group.name === "project") && quietMenu.rows.length >= 4, `${tag} quiet: ⋯ holds ${quietMenu.rows.length} rows without Archive and Delete`);
+      report[`${tag}:quiet`] = { menu: quietMenu };
+      await quiet.close();
+    }
+
+    /* The phone keeps its own 52 px bar, with the waiting count, and its menu has no undo or redo. */
+    for (const lang of ["en", "uk"] as const) for (const colorScheme of ["light", "dark"] as const) {
+      const tag = `390-${lang}-${colorScheme}`;
+      const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme, reducedMotion: "reduce" });
+      await phone.addInitScript(seedInit);
+      await phone.addInitScript((value: string) => localStorage.setItem("llv_lang", value), lang);
+      const page = await phone.newPage();
+      await page.goto(`${baseUrl}/#p=${encodeURIComponent(project)}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+      await page.waitForSelector("[data-mobile2-bar]", { timeout: 120_000 });
+      await page.waitForTimeout(2_500);
+      const phoneBar = await page.evaluate(() => {
+        const bar = document.querySelector("[data-mobile2-bar]")!;
+        const box = bar.getBoundingClientRect();
+        const targets = [...bar.querySelectorAll("button")].map((button) => { const r = button.getBoundingClientRect(); return { w: r.width, h: r.height }; }).filter((r) => r.w > 0);
+        return { h: box.height, w: box.width, text: bar.textContent?.replace(/\s+/g, " ").trim() ?? "", targets, desktopBars: document.querySelectorAll("header.bar, [data-project-bar]").length };
+      });
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}.png`), clip: { x: 0, y: 0, width: 390, height: 120 } });
+      must(near(phoneBar.h, 52, 0.5), `${tag}: the phone bar is ${phoneBar.h}px tall`);
+      must(phoneBar.desktopBars === 0, `${tag}: ${phoneBar.desktopBars} desktop bars render on the phone`);
+      must(/[1-9]/.test(phoneBar.text), `${tag}: the phone bar shows no waiting count («${phoneBar.text}»)`);
+      must(phoneBar.targets.every((target) => target.h >= 44 && target.w >= 44), `${tag}: a phone bar target is under 44 px`);
+      await page.click('[data-mobile2-bar] [data-mobile2-open="menu"]');
+      await page.waitForSelector('[data-mobile2-sheet="menu"]');
+      await page.waitForTimeout(400);
+      const rows = await page.evaluate(() => [...document.querySelectorAll("[data-mobile2-menu-row]")].map((row) => row.getAttribute("data-mobile2-menu-row")));
+      await page.screenshot({ path: path.join(OUT_DIR, `header-${tag}-menu.png`), fullPage: false });
+      must(!rows.includes("undo") && !rows.includes("redo"), `${tag}: the phone menu still has ${rows.join(", ")}`);
+      report[tag] = { ...phoneBar, menuRows: rows };
+      await phone.close();
+    }
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    await stop(server);
+    for (const holder of holders) holder.kill("SIGTERM");
+  }
+  report.failures = failures;
+  fs.writeFileSync(path.join(OUT_DIR, "header.json"), JSON.stringify(report, null, 2) + "\n", "utf8");
+  console.log(`header measurements: ${path.join(OUT_DIR, "header.json")}`);
+  if (failures.length) {
+    process.exitCode = 1;
+    console.error(`board header acceptance FAILED (${failures.length}):\n  ${failures.join("\n  ")}`);
+  } else {
+    console.log("board header acceptance passed at 2540, 1850 and 1280 (en, uk; light, dark; Tasks closed and open; a 21-character project name) and 390 (en, uk; light, dark).");
+  }
+}
+
+/* BOARD_CAPTURE_CASE=header runs the header bar's case (#1801) instead of the camera probes. */
+if (process.env.BOARD_CAPTURE_CASE === "header") await headerMain();
+else await main();

@@ -23,50 +23,78 @@
 /* The board's own controls start from nothing. The conversations and the
    orchestrator mounted inside it are the Viewer's components, styled by their
    own utilities, so none of these element rules reach into them. */
-.kb :where(button, input):not(:where(.reader-host *, .seat *)) { font: inherit; color: inherit; }
-.kb button:not(:where(.reader-host *, .seat *)) { background: none; border: 0; padding: 0; }
-.kb :focus-visible:not(:where(.reader-host *, .seat *)) { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 4px; }
+.kb :where(button, input):not(:where(.reader-host *, .seat *, .bar-slot *, .kb-aside *)) { font: inherit; color: inherit; }
+.kb button:not(:where(.reader-host *, .seat *, .bar-slot *, .kb-aside *)) { background: none; border: 0; padding: 0; }
+.kb :focus-visible:not(:where(.reader-host *, .seat *, .bar-slot *, .kb-aside *)) { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 4px; }
 .kb :where(.seat-head, .conv-head) :where(.icon-btn), .kb :where(.rlatest) { font: inherit; color: inherit; background: none; border: 0; padding: 0; }
 .kb .num { font-variant-numeric: tabular-nums; }
 
 /* ── Bar ─────────────────────────────────────────────────────────────────── */
-/* The Viewer's attention island is fixed to the top-right corner just under
-   the header row, over this bar: the right edge stays clear for it, and on a
-   tabbed board the controls start below it. */
-.kb .bar {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 10px 236px 10px 20px; border-bottom: 1px solid var(--border-default); background: var(--surface-card);
-}
+.kb .bar { border-bottom: 1px solid var(--border-default); background: var(--surface-card); }
 .kb .bar .summary { color: var(--color-secondary); font-size: var(--text-ui); display: inline-flex; gap: 6px; align-items: center; }
 .kb .bar .summary .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-success); display: inline-block; }
-.kb .bar .summary .dot.warn { background: var(--color-warning); }
 .kb .bar .bar-alert { color: var(--color-danger); font-size: var(--text-ui); font-weight: 600; }
-.kb .bar .grow { flex: 1 1 auto; }
-.kb .bar .bar-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .kb .bar .search { position: relative; }
 .kb .bar .search input {
-  width: 240px; height: 32px; padding: 0 10px 0 30px; border: 1px solid var(--border-default); border-radius: var(--radius-control);
+  height: 32px; padding: 0 10px 0 30px; border: 1px solid var(--border-default); border-radius: var(--radius-control);
   background: var(--surface-sunken); font-size: var(--text-ui);
 }
 .kb .bar .search input:focus { background: var(--surface-card); border-color: var(--color-accent); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 25%, transparent); }
 .kb .bar .search svg { position: absolute; left: 9px; top: 8px; width: 15px; height: 15px; color: var(--color-muted); pointer-events: none; }
+
+/* The project board's one header bar (#1801, docs/design/board-header.md): one
+   48 px row at every desktop width, 32 px controls, 8 px inside a group and
+   16 px between groups. Nothing wraps; when the row is short the search field
+   gives way first, then the project name. The Viewer's attention island is
+   fixed over the right end of this row, which stays clear for it. The slots
+   (`.bar-slot`) hold the Viewer's own components, styled by their utilities. */
+.kb .bar[data-bar="project"] {
+  display: flex; align-items: center; gap: 16px; flex-wrap: nowrap; height: 48px; flex-shrink: 0;
+  padding: 0 236px 0 16px;
+}
+.kb .bar[data-bar="project"] :is(.bar-group, .bar-slot) { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+/* The search gives way first. Wide, the lead never shrinks below its content; narrow, it holds
+   only the project name, which then truncates down to its 48 px floor, so a long name never
+   pushes the row into the island's reserve. */
+.kb .bar[data-bar="project"] .bar-lead { flex-shrink: 1; }
+.kb .bar[data-bar="project"][data-bar-tier="narrow"] .bar-lead { min-width: 48px; }
+/* The panel toggles and the ⋯ menu are two groups: 16 px apart, like every other pair of groups. */
+.kb .bar[data-bar="project"] .bar-trail { gap: 16px; }
+.kb .bar[data-bar="project"] .summary { white-space: nowrap; flex-shrink: 0; }
+.kb .bar[data-bar="project"] .grow { flex: 1 1 0; min-width: 0; }
+.kb .bar[data-bar="project"] .search { flex: 1 8 240px; max-width: 420px; min-width: 160px; }
+.kb .bar[data-bar="project"] .search input { width: 100%; }
+/* A bar under 768 px (a narrow desktop window) cannot hold the groups beside the island's
+   reserve in one row; there, and only there, they wrap. The bar's own width decides, since it
+   spans the Tasks panel: a board narrowed by the panel keeps its one-row bar. */
+.kb .bar[data-bar="project"][data-bar-wrap] { flex-wrap: wrap; height: auto; padding: 8px 236px 8px 16px; row-gap: 8px; }
+.kb .bar[data-bar="project"][data-bar-wrap] .grow { display: none; }
+
+/* The Overview's bar, as it was before #1801 (that lane was the project board only). The
+   Viewer's attention island is fixed to the top-right corner just under the header row, over
+   this bar: the right edge stays clear for it, and on a tabbed board the controls start below it. */
+.kb .bar[data-bar="overview"] { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 236px 10px 20px; }
+.kb .bar[data-bar="overview"] .summary .dot.warn { background: var(--color-warning); }
+.kb .bar[data-bar="overview"] .grow { flex: 1 1 auto; }
+.kb .bar[data-bar="overview"] .bar-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.kb .bar[data-bar="overview"] .search input { width: 240px; }
 /* Two rows: only the first, beside the island, needs the clearance. */
-.kb[data-mode="scroll"] .bar { padding: 10px 236px 10px 16px; }
-.kb[data-mode="scroll"] .bar .bar-tools { margin-right: -220px; }
-.kb[data-mode="tabs"] .bar { padding: 44px 16px 10px; }
-.kb[data-mode="scroll"] .bar .bar-tools, .kb[data-mode="tabs"] .bar .bar-tools { flex-basis: 100%; }
-.kb[data-mode="scroll"] .bar .search, .kb[data-mode="tabs"] .bar .search { flex: 1 1 auto; }
-.kb[data-mode="scroll"] .bar .search input, .kb[data-mode="tabs"] .bar .search input { width: 100%; min-width: 120px; }
-.kb[data-mode="tabs"] .bar .summary { display: none; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] { padding: 10px 236px 10px 16px; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .bar-tools { margin-right: -220px; }
+.kb[data-mode="tabs"] .bar[data-bar="overview"] { padding: 44px 16px 10px; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .bar-tools, .kb[data-mode="tabs"] .bar[data-bar="overview"] .bar-tools { flex-basis: 100%; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .search, .kb[data-mode="tabs"] .bar[data-bar="overview"] .search { flex: 1 1 auto; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .search input, .kb[data-mode="tabs"] .bar[data-bar="overview"] .search input { width: 100%; min-width: 120px; }
+.kb[data-mode="tabs"] .bar[data-bar="overview"] .summary { display: none; }
 /* On the two narrow faces the controls come first and the search field takes
    what is left: the attention island's card, when it opens over the right end
    of this row, covers part of the field instead of the view tabs. */
-.kb[data-mode="scroll"] .bar .view-switch, .kb[data-mode="tabs"] .bar .view-switch { order: 1; }
-.kb[data-mode="scroll"] .bar .hidden-pill, .kb[data-mode="tabs"] .bar .hidden-pill { order: 2; }
-.kb[data-mode="scroll"] .bar .search, .kb[data-mode="tabs"] .bar .search { order: 3; min-width: 0; flex-basis: 160px; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .view-switch, .kb[data-mode="tabs"] .bar[data-bar="overview"] .view-switch { order: 1; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .hidden-pill, .kb[data-mode="tabs"] .bar[data-bar="overview"] .hidden-pill { order: 2; }
+.kb[data-mode="scroll"] .bar[data-bar="overview"] .search, .kb[data-mode="tabs"] .bar[data-bar="overview"] .search { order: 3; min-width: 0; flex-basis: 160px; }
 /* Tabbed (narrowest) face: the island's card spans most of the first row
    under the badge, so that row is the search field and the tabs follow. */
-.kb[data-mode="tabs"] .bar .search { order: 0; flex-basis: 100%; }
+.kb[data-mode="tabs"] .bar[data-bar="overview"] .search { order: 0; flex-basis: 100%; }
 
 .kb .btn {
   display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
@@ -80,7 +108,7 @@
 .kb .btn.hidden-pill[data-count="0"] { display: none; }
 .kb .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .kb .btn .plus { color: var(--color-accent); font-size: 14px; line-height: 1; }
-/* `+ Task` and `+ Agent` (K9a), after the tools as the prototype's bar has them. */
+/* The Overview's `+ Agent`, after its tools. */
 .kb .bar .bar-create { display: flex; align-items: center; gap: 8px; }
 
 .kb .scroll-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
@@ -460,6 +488,7 @@
   animation: kb-menu-in var(--motion-base) var(--ease-standard);
 }
 @keyframes kb-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+.kb .menu .ico { width: 15px; height: 15px; flex-shrink: 0; }
 .kb .menu [role="menuitem"], .kb .menu [role="menuitemradio"] {
   display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 10px; border-radius: var(--radius-control);
   font-size: var(--text-ui); text-align: left; color: var(--color-primary);
@@ -515,7 +544,7 @@
 /* ── Coarse pointer: 44 px targets ────────────────────────────────────────── */
 @media (pointer: coarse) {
   .kb { --target: 44px; }
-  .kb .bar .search input { height: 44px; }
+  .kb .bar[data-bar="overview"] .search input { height: 44px; }
   .kb .card .title { min-height: 44px; }
   .kb .tabs-nav button, .kb .btn, .kb .pill, .kb .receipt .act, .kb .popover .row .show, .kb .refs .ref { min-height: 44px; }
   .kb .pill { height: 36px; padding: 0 12px; }
@@ -534,7 +563,10 @@
 /* The seat keeps its height and the board keeps a full page below it; the
    page scrolls between the two instead of squeezing the columns (prototype
    `#app > .board`). */
-.kb .kb-page { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; container-type: size; }
+/* The board's page and, beside it, the project's Tasks panel: both under the one bar (#1801). */
+.kb .kb-body { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.kb .kb-aside { display: flex; min-height: 0; flex-shrink: 0; }
+.kb .kb-page { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; container-type: size; }
 .kb .board-frame { flex: 0 0 auto; height: max(440px, 100cqh); min-height: 0; display: flex; flex-direction: column; outline: none; }
 .kb .skip-board {
   position: absolute; left: 20px; top: 8px; z-index: 6; transform: translateY(-300%);

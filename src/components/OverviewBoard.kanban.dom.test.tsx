@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import { translate } from "@/lib/i18n";
 import { en } from "@/lib/i18n/en";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -268,6 +269,20 @@ test("what needs one project to write into is absent, never faked", () => {
   expect(host.querySelector("[data-kanban-search]")).toBeTruthy();
   expect(host.querySelector("[data-hidden-pill]")).toBeTruthy();
   expect(cardOf(host, "t-ledger")?.querySelector(".foot .pill")).toBeTruthy();
+});
+
+test("the Overview's bar keeps its three facts; the project board's bar, put in order (#1801), says each once", () => {
+  const { host } = mount(FILES, TASKS);
+  const summary = (root: HTMLElement) => root.querySelector<HTMLElement>(".bar .summary")?.textContent ?? "";
+
+  /* Three live turns across three projects; the task count is the board's, before the narrowing. */
+  expect(summary(host)).toContain(translate("en", "kanban.overviewWorking", { count: 3 }));
+  expect(summary(host)).toContain(translate("en", "kanban.overviewTasks", { count: 5 }));
+
+  /* The project's own board keeps only who is working: the waiting signal and the
+     task count live elsewhere on its bar and its columns. */
+  const project = mountProjectBoard();
+  expect(summary(project)).toBe(translate("en", "kanban.summaryWorking", { count: 0 }));
 });
 
 test("nothing that navigates is nested inside anything else that navigates (#699)", () => {

@@ -1,9 +1,8 @@
 "use client";
 
-import { Archive, Bot, Columns3, Info, LayoutGrid, List, ListTodo, ListTree, MessageSquarePlus, Network, Redo2, Search, Undo2, UserRound } from "lucide-react";
+import { Archive, Bot, Columns3, Info, LayoutGrid, List, ListTodo, ListTree, MessageSquarePlus, Network, Search, UserRound } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
 import { FavoritesProvider, type FavoritesApi } from "./favorites/FavoritesContext";
 import { resolveFavoriteRows } from "./favorites/favoriteRows";
@@ -22,14 +21,12 @@ import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
-import { BoardHistoryControls } from "./BoardHistoryControls";
 import { createFocusEdgeGate } from "./focusRequestEdge";
 import { useMobileInlineCatalog } from "./mobile/MobileInlineCatalog";
 import { deriveOrchestratorPanelState, resolveSeatFile } from "./orchestrator/seatState";
 import { ConversationList } from "./ConversationList";
 import { DesktopConversations } from "./DesktopConversations";
 import { clearDraftStorage, draftBand, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftBand, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
-import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { useOrchestratorSeat } from "./orchestrator/useOrchestratorSeat";
 import { useOrchestratorIncumbent } from "./orchestrator/useOrchestratorIncumbent";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
@@ -93,6 +90,7 @@ import { ArchiveRestore } from "./icons";
 import { KeepAwakeMenuRow } from "./KeepAwakeControl";
 import { ArchiveProjectButton, DeleteProjectButton } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
+import { BAR_MENU_ROW, BarCreateGroup, BarMenuGroup, BarMoreMenu, BarPanelToggles, DashboardBar } from "./ProjectBar";
 
 /** How long an opened node keeps its highlight ring on the scheme. */
 const HIGHLIGHT_MS = 1800;
@@ -244,40 +242,38 @@ function gotoProject(project: string) {
 type DesktopView = "kanban" | "list";
 
 /**
- * The desktop view switch: Board and Conversations (#1614, #1695).
+ * The desktop view switch: Board and Conversations (#1614, #1695, #1801).
  *
- * `floating` draws it as its own chip over a leaf that has no chrome of its own
- * (Conversations, the empty project); on the Board it is `inline`, in flow in
- * the kanban's own bar, so nothing floats over the board's corner.
+ * One outlined 32 px group in the header bar, whichever leaf shows; the
+ * selected segment is pressed (accent fill), the other quiet. `compact` drops
+ * the words below the bar's wide tier, leaving them as the accessible name.
  */
 function ProjectViewTabs({
   value,
   onChange,
-  floating = false,
-  inline = false,
+  compact = false,
   modes = ["kanban", "list"],
 }: {
   value: DesktopView;
   onChange: (next: DesktopView) => void;
-  floating?: boolean;
-  /** Drawn in a toolbar row of its own (the kanban board's bar): the chip, in flow. */
-  inline?: boolean;
+  compact?: boolean;
   /** The views this project can show on the desktop: the Board, and Conversations when there are any. */
   modes?: readonly DesktopView[];
 }) {
   const { t } = useLocale();
   const labelOf = (mode: DesktopView) => t(mode === "kanban" ? "kanban.viewTab" : "dash.viewList");
   const iconOf = (mode: DesktopView) => mode === "kanban"
-    ? <Columns3 className="h-3 w-3" aria-hidden />
-    : <List className="h-3 w-3" aria-hidden />;
+    ? <Columns3 className="h-[15px] w-[15px]" aria-hidden />
+    : <List className="h-[15px] w-[15px]" aria-hidden />;
   return (
     <div
       data-project-view-tabs
-      className={`z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-card p-0.5 shadow-1 ${
-        floating ? "absolute left-3 top-3" : inline ? "" : "mx-3 mt-3 self-start"
-      }`}
+      data-bar-control=""
+      className="inline-flex h-8 shrink-0 items-stretch overflow-hidden rounded-control border border-border bg-card shadow-1"
     >
-      {modes.map((mode) => (
+      {/* The segments fill the group edge to edge, split by one rule, so the group's border
+          is the switch's visible edge and its neighbours sit 8 / 16 px from it. */}
+      {modes.map((mode, index) => (
         <button
           key={mode}
           type="button"
@@ -285,12 +281,13 @@ function ProjectViewTabs({
           data-view-tab={mode}
           onClick={() => onChange(mode)}
           aria-label={labelOf(mode)}
-          className={`inline-flex items-center justify-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-            value === mode ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"
-          }`}
+          title={compact ? labelOf(mode) : undefined}
+          className={`inline-flex items-center justify-center gap-1.5 text-[12px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
+            compact ? "w-8" : "px-3"
+          } ${index > 0 ? "border-l border-border" : ""} ${value === mode ? "bg-accent/10 text-accent" : "bg-transparent text-secondary hover:bg-well hover:text-primary"}`}
         >
           {iconOf(mode)}
-          {labelOf(mode)}
+          {compact ? null : labelOf(mode)}
         </button>
       ))}
     </div>
@@ -470,10 +467,6 @@ function ProjectDashboardView({
      first painted board already reflects closes, worker-stack collapse and caps
      instead of flashing the raw scan snapshot and culling it. */
   const boardReady = boardFirstPaintReady(loaded, board.loaded);
-  /* Per-project, device-local undo/redo log of recent board actions (issue
-     #184). v1 records card closes; undo reopens the last-closed card through the
-     shared restore path, redo closes it again. */
-  const history = useBoardActionHistory(project);
   const prefs = useMemo<ColumnPrefs>(
     () => ({ manual: board.prefs.manual, hidden: board.prefs.hidden, expanded: board.prefs.expanded }),
     [board.prefs],
@@ -1337,7 +1330,7 @@ function ProjectDashboardView({
     openSwitchboardFile(file);
   };
 
-  /* The raw close, shared by an explicit user close and a history redo. */
+  /* The raw close behind an explicit user close. */
   const applyClose = (path: string) => {
     /* Card dismissal owns presentation only. Runtime termination stays on the
        conversation's explicit process control: a child can share its root's
@@ -1357,11 +1350,6 @@ function ProjectDashboardView({
        so the saved view is the authority again — the same retirement the
        Схема/Список control performs, from the other end of the gesture. */
     if (path === openedConversation) setOpenedConversation(null);
-    /* Record the close in the undo log before applying it, capturing the current
-       title for the undo tooltip. Redo replays through `applyClose` directly, so
-       it never re-records and the log stays a single linear trail. */
-    const title = projectCatalog.get(path)?.title ?? files.find((file) => file.path === path)?.title ?? "";
-    history.record({ kind: "close", path, title });
     /* Closing a card is the explicit dismissal a finished-but-unread outcome
        needs (#1244): it takes effect at once, and restoring the card later
        brings back a read result rather than a fresh unread one. */
@@ -1577,46 +1565,10 @@ function ProjectDashboardView({
     openBoardRow(file);
   };
 
-  /* Undo a close: reopen the card through the shared restore path so #199's
-     durable membership rebinds it to its pipeline/review zone automatically. When
-     the file entry is known we go through `openSwitchboardFile` (same role-based
-     placement + focus as an explicit open); otherwise we lift the tombstone
-     directly so a card whose transcript is momentarily absent still comes back. */
-  const onUndo = () => {
-    const entry = history.undo();
-    if (entry === null || entry.kind !== "close") return;
-    const file = projectCatalog.get(entry.path) ?? files.find((item) => item.path === entry.path);
-    if (file) openSwitchboardFile(file);
-    else board.restore(entry.path, "manual");
-  };
-  const onRedo = () => {
-    const entry = history.redo();
-    if (entry === null || entry.kind !== "close") return;
-    applyClose(entry.path);
-  };
-  /* Keep the keyboard handler pointed at the latest closures without re-binding
-     the listener every render. */
-  const undoRedoRef = useRef({ onUndo, onRedo });
-  undoRedoRef.current = { onUndo, onRedo };
-  useEffect(() => {
-    if (project === null) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      if (event.key.toLowerCase() !== "z") return;
-      /* Never steal Ctrl+Z from a text field — the composer and rename inputs own
-         their own undo. */
-      const target = event.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
-      event.preventDefault();
-      if (event.shiftKey) undoRedoRef.current.onRedo();
-      else undoRedoRef.current.onUndo();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [project]);
-
   const statusBits: string[] = [];
+  /* Narrow, the bar keeps only the live count: «· N trees» and the quiet line are what the
+     Conversations list below already shows, and the name is the one text that truncates (#1801). */
+  const narrowStatus = liveCount ? t("dash.branchesLive", { count: liveCount }) : null;
   if (liveCount) {
     statusBits.push(
       `${t("dash.branchesLive", { count: liveCount })} · ${t("dash.trees", { count: treeGroups })}`,
@@ -1950,13 +1902,6 @@ function ProjectDashboardView({
       },
       { kind: "divider", key: "d2" },
     );
-    if (history.canUndo || history.canRedo) {
-      /* Board history stays here until the receipts of later lanes carry the
-         inverse of a close on the phone (issue #184, #1054 review). */
-      if (history.canUndo) entries.push({ kind: "row", key: "undo", icon: <Undo2 className="h-[18px] w-[18px]" aria-hidden />, label: t("board.undo"), onSelect: () => { mobileNav.closeSheet(); onUndo(); } });
-      if (history.canRedo) entries.push({ kind: "row", key: "redo", icon: <Redo2 className="h-[18px] w-[18px]" aria-hidden />, label: t("board.redo"), onSelect: () => { mobileNav.closeSheet(); onRedo(); } });
-      entries.push({ kind: "divider", key: "d3" });
-    }
     entries.push(
       {
         kind: "custom",
@@ -2003,6 +1948,78 @@ function ProjectDashboardView({
     return entries;
   };
 
+  /* The header bar's two ends (#1801, docs/design/board-header.md), shared by the Board's bar and
+     the other leaves' bar. Lead: where am I — the project and, when the bar is wide, its account
+     switches (#1331). Trail: the two panel toggles and the ⋯ menu, which holds message search
+     (on the Board, whose find field filters cards), sound, archive, delete and, when narrow, one
+     row per account switch. Undo and redo left the header (#1801; a kanban undo is #1856). */
+  const openTaskCount = projectTasks.filter((task) => task.status !== "done").length;
+  const barLead = (wide: boolean) => (
+    <>
+      <h1 className="min-w-12 max-w-[220px] truncate text-[13.5px] font-bold" title={projectName}>{projectName}</h1>
+      {wide ? <ProjectAccounts project={project} appearance="bar" /> : null}
+    </>
+  );
+  const barTrail = (wide: boolean, withSearch: boolean) => (
+    <>
+      <BarPanelToggles
+        wide={wide}
+        orchestrator={onToggleOrchestratorPanel ? {
+          open: kanbanLeaf ? !kanbanSeat.collapsed : orchestratorPanelOpen,
+          onToggle: kanbanLeaf ? kanbanSeat.toggle : onToggleOrchestratorPanel,
+        } : null}
+        tasks={{ open: taskPanelOpen, count: openTaskCount, onToggle: toggleTaskPanel }}
+      />
+      <BarMoreMenu
+        rows={(close) => (
+          <>
+            {withSearch && onOpenSearch ? (
+              <BarMenuGroup name="search">
+                <button type="button" className={BAR_MENU_ROW} data-testid="dash-search" onClick={() => { close(); onOpenSearch(); }}>
+                  <Search className="h-[15px] w-[15px]" aria-hidden /> {t("search.open")}
+                </button>
+              </BarMenuGroup>
+            ) : null}
+            {wide ? null : (
+              <BarMenuGroup name="accounts">
+                <ProjectAccounts project={project} appearance="menu" />
+              </BarMenuGroup>
+            )}
+            <BarMenuGroup name="sound">
+              <SoundToggle variant="menu" rowClassName={BAR_MENU_ROW} />
+            </BarMenuGroup>
+            <BarMenuGroup name="project">
+              {archived ? (
+                <button type="button" className={BAR_MENU_ROW} data-project-unarchive="" onClick={() => { close(); onUnarchive(project); }}>
+                  <ArchiveRestore className="h-[15px] w-[15px]" aria-hidden /> {t("dash.unarchive")}
+                </button>
+              ) : (
+                <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} rowClassName={BAR_MENU_ROW} />
+              )}
+              <DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} rowClassName={BAR_MENU_ROW} />
+            </BarMenuGroup>
+          </>
+        )}
+      />
+    </>
+  );
+
+  /* The Tasks panel. The Board draws it under its bar, so the bar spans it and the attention
+     island sits over the bar, clear of the panel's header (#1801); the other leaves' bar already
+     spans the row the panel sits in. */
+  const taskPanel = taskPanelOpen ? (
+    <TaskPanel
+      tasks={tasks}
+      project={project}
+      boardMembers={boardMemberKeys}
+      favorites={favoriteRows}
+      onOpenFavorite={openSwitchboardFile}
+      onToggleFavorite={(id) => board.setFavorite(id, false)}
+      onOpenTask={openTask}
+      onClose={toggleTaskPanel}
+    />
+  ) : null;
+
   const renderMobileSheet = (name: MobileSheetName, close: () => void) => {
     if (name === "menu") return <MobileMenuSheet title={projectName} entries={mobileMenuEntries()} onClose={close} />;
     /* A board row's long-press (#1671): the same actions its swipe reveals. */
@@ -2036,90 +2053,44 @@ function ProjectDashboardView({
   return (
     <FavoritesProvider value={favoritesApi}>
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-      {isMobile ? null : (
-        /* The desktop header row. The phone renders the shell's bar instead
-           (mobile v2 lane 1): one 52 px bar with the project name as the title
-           cell and at most three 44 px targets, everything else behind ⋯. */
-        <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4">
-          <h1 className="truncate text-[13.5px] font-bold" title={projectName}>{projectName}</h1>
-          {/* The project account surface is one compact switch per relevant engine
-              (#1331). Pool/carrier detail opens on demand, and quiet projects still
-              spend no header slot. */}
-          <ProjectAccounts project={project} />
-          <BoardHistoryControls
-            canUndo={history.canUndo}
-            canRedo={history.canRedo}
-            undoEntry={history.undoEntry}
-            redoEntry={history.redoEntry}
-            onUndo={onUndo}
-            onRedo={onRedo}
-          />
-          <>
-            {/* Issue #696: the header borrows the affirmative idle line only
-                when the catalog is actually known. Under a failing fetch it
-                names the failure, exactly as the overview board does. */}
-            <span className={`truncate text-[11.5px] ${catalogFailures > 0 ? "font-semibold text-danger" : "text-muted"}`}>
+      {/* The desktop header bar on every leaf the board does not draw (#1801): the loading
+          skeleton, Conversations and the empty project. The Board draws the same bar itself,
+          with its own find, view and create groups between the same two ends. The phone
+          renders the shell's bar instead (mobile v2 lane 1). */}
+      {isMobile || (boardReady && kanbanLeaf) ? null : (
+        <DashboardBar
+          lead={barLead}
+          status={(wide) => (
+            /* Issue #696: the header borrows the affirmative idle line only
+               when the catalog is actually known. Under a failing fetch it
+               names the failure, exactly as the overview board does. */
+            <span data-bar-group="status" className={`${wide || !narrowStatus ? "min-w-16 shrink" : "shrink-0"} truncate whitespace-nowrap text-[12px] ${catalogFailures > 0 ? "font-semibold text-danger" : "text-secondary"}`}>
               {catalogFailures > 0
                 ? t("catalog.unreachable")
-                : statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}
+                : (wide ? (statusBits.length ? statusBits.join(" · ") : null) : narrowStatus) ?? (statusBits[0] ?? t("common.nothingRunning"))}
             </span>
-            <SoundToggle />
-            {archived ? (
-              <button
-                type="button"
-                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold text-muted hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                onClick={() => onUnarchive(project)}
-              >
-                <ArchiveRestore className="h-3 w-3" aria-hidden /> {t("dash.unarchive")}
-              </button>
-            ) : (
-              <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
-            )}
-            <DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} />
-            {/* One elastic cell absorbs the slack so the whole control cluster
-                stays right-aligned — the same rule the phone header follows. */}
-            <span aria-hidden className="min-w-0 flex-1" />
-            {onOpenSearch ? (
-              <button
-                type="button"
-                data-testid="dash-search"
-                aria-label={t("search.open")}
-                title={t("search.open")}
-                onClick={onOpenSearch}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                <Search className="h-4 w-4" aria-hidden />
-              </button>
-            ) : null}
-            {/* The orchestrator dock's switch opens the left-hand column: first
-                in the right-aligned control cluster, because the panel it opens
-                is the leftmost thing on screen (PRD #976 decision 6). */}
-            {onToggleOrchestratorPanel ? (
-              <OrchestratorPanelToggle
-                open={kanbanLeaf ? !kanbanSeat.collapsed : orchestratorPanelOpen}
-                onToggle={kanbanLeaf ? kanbanSeat.toggle : onToggleOrchestratorPanel}
-              />
-            ) : null}
+          )}
+          find={(wide) => onOpenSearch ? (
             <button
               type="button"
-              onClick={toggleTaskPanel}
-              aria-pressed={taskPanelOpen}
-              aria-label={t("tasks.panelToggleAria")}
-              className={`flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-border bg-card text-primary hover:border-accent/45 hover:text-accent"
-              }`}
+              data-testid="dash-search"
+              data-bar-group="find"
+              data-bar-control=""
+              aria-label={t("search.open")}
+              title={t("search.open")}
+              onClick={onOpenSearch}
+              className="inline-flex h-8 min-w-[160px] max-w-[420px] flex-[1_8_240px] items-center gap-2 rounded-control border border-border bg-sunken px-2.5 text-left text-[12px] text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
-              <ListTodo className="h-3.5 w-3.5" aria-hidden /> {t("tasks.panelTitle")}
-              {projectTasks.filter((task) => task.status !== "done").length ? (
-                <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">
-                  {projectTasks.filter((task) => task.status !== "done").length}
-                </span>
-              ) : null}
+              <Search className="h-[15px] w-[15px] shrink-0" aria-hidden />
+              <span className="min-w-0 truncate">{wide ? t("search.open") : t("dash.searchShort")}</span>
             </button>
-            {/* No «+ Pipeline» on the desktop (#1695): pipelines are created by agents through MCP, and their
-                drafts and stages are shown and edited on the Board's cards and Stages sheet. */}
-          </>
-        </div>
+          ) : null}
+          view={(wide) => (boardReady && listAvailable
+            ? <ProjectViewTabs value="list" onChange={chooseDesktopView} modes={desktopViewModes} compact={!wide} />
+            : null)}
+          create={(wide) => (boardReady && listAvailable ? <BarCreateGroup wide={wide} reserve /> : null)}
+          trail={(wide) => barTrail(wide, false)}
+        />
       )}
 
       {templatePickerOpen ? (
@@ -2312,12 +2283,6 @@ function ProjectDashboardView({
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* The board carries the switch inside its own tool palette (see
-                ProjectViewTabs); every other desktop leaf has no chrome in that
-                corner, so there it floats. */}
-            {boardReady && listAvailable && !desktopBoardLeaf ? (
-              <ProjectViewTabs value="list" onChange={chooseDesktopView} modes={desktopViewModes} floating />
-            ) : null}
             {!boardReady ? (
               catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
             ) : kanbanLeaf ? (
@@ -2357,7 +2322,10 @@ function ProjectDashboardView({
                 onHandoff={addHandoffDraft}
                 onSpawnRetry={retryLaunch}
                 onCloseConversation={(file) => closeNode(file.path)}
-                viewSwitch={<ProjectViewTabs value="kanban" onChange={chooseDesktopView} modes={desktopViewModes} inline />}
+                viewSwitch={(wide) => <ProjectViewTabs value="kanban" onChange={chooseDesktopView} modes={desktopViewModes} compact={!wide} />}
+                barLead={barLead}
+                barTrail={(wide) => barTrail(wide, true)}
+                aside={taskPanel}
               />
             ) : listAvailable ? (
               <DesktopConversations project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
@@ -2370,18 +2338,7 @@ function ProjectDashboardView({
               />
             )}
           </div>
-          {taskPanelOpen ? (
-            <TaskPanel
-              tasks={tasks}
-              project={project}
-              boardMembers={boardMemberKeys}
-              favorites={favoriteRows}
-              onOpenFavorite={openSwitchboardFile}
-              onToggleFavorite={(id) => board.setFavorite(id, false)}
-              onOpenTask={openTask}
-              onClose={toggleTaskPanel}
-            />
-          ) : null}
+          {boardReady && kanbanLeaf ? null : taskPanel}
         </div>
       )}
 

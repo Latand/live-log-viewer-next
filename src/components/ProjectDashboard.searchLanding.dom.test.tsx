@@ -48,6 +48,14 @@ mock.module("@/hooks/useConversationCatalog", () => ({
 const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 
 const dom = new Window({ url: "http://localhost/", width: 1440, height: 900 });
+/* The Board measures itself for its bar's tier (#1801); happy-dom lays nothing
+   out, so the board reports a desktop width and the view switch keeps its
+   labels. */
+const measureRect = dom.HTMLElement.prototype.getBoundingClientRect;
+dom.HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+  const rect = measureRect.call(this);
+  return this.classList?.contains("kb") ? { ...rect, width: 2292, right: 2292 } as DOMRect : rect;
+} as typeof measureRect;
 const G = globalThis as Record<string, unknown>;
 
 let mobile = false;
