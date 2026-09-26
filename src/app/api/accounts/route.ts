@@ -14,7 +14,7 @@ import {
 } from "@/lib/accounts/projectBindings";
 import { agentRegistry } from "@/lib/agent/registry";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
-import { accountProjection, liveFreshObservation } from "@/lib/accounts/accountProjection";
+import { accountProjection, currentObservation, liveFreshObservation } from "@/lib/accounts/accountProjection";
 import { AUTO_BALANCE_THRESHOLD } from "@/lib/accounts/migration/quotaPolicy";
 import type { MigrationEngine } from "@/lib/accounts/migration/contracts";
 
@@ -142,6 +142,7 @@ export async function GET() {
       id: account.id,
       label: account.label,
       kind: account.kind,
+      ...(account.provider ? { provider: account.provider } : {}),
       authPresent: account.authPresent,
       loginPending: login ? LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) : false,
       loginState: account.authPresent ? "authenticated" : "idle",
@@ -151,6 +152,7 @@ export async function GET() {
       // A denied or unavailable store cannot prove that credentials are absent.
       // Keep durable live auth evidence authoritative in either direction.
       ...accountProjection(claudeObservations[account.id], account.authPresent || account.credentialState === "unknown", now),
+      ...(account.provider ? { auth: { state: !account.authPresent || (currentObservation(claudeObservations[account.id], now) && claudeObservations[account.id]?.provenance.reason === "provider authentication failed") ? "error" : "authenticated", method: "provider", email: null, plan: null, checkedAt: claudeObservations[account.id]?.authCheckedAt ?? null }, limits: { state: "unavailable", session: null, weekly: null, tiers: [], checkedAt: null }, effective: null } : {}),
       login,
     };
   });

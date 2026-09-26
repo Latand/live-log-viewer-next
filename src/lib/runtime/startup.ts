@@ -1138,6 +1138,7 @@ export type ClaudeStartupOwner = {
   kind: "legacy" | "managed";
   transcriptRoot: string;
   env: NodeJS.ProcessEnv;
+  claudeProvider?: { baseUrl: string; model: string; smallFastModel: string | null };
 };
 
 /**
@@ -1169,6 +1170,7 @@ export function claudeStartupHostOptions(
     cwd: entry.cwd,
     claudeConfigDir: launchPaths?.claudeConfigDir,
     claudeProjectsDir: owner?.transcriptRoot,
+    providerAccount: Boolean(owner?.claudeProvider),
     spawnPolicyBaseSettingsPath: launchPaths?.spawnPolicyBaseSettingsPath ?? null,
     allowSubagents: entry.launchProfile?.allowSubagents ?? false,
     mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
@@ -1177,7 +1179,11 @@ export function claudeStartupHostOptions(
     restricted: entry.launchProfile?.sandbox === "restricted",
     env: access.env,
     ...access.host,
-    model: entry.launchProfile?.model ?? undefined,
+    model: owner?.claudeProvider
+      ? entry.launchProfile?.model === "haiku" && owner.claudeProvider.smallFastModel
+        ? owner.claudeProvider.smallFastModel
+        : owner.claudeProvider.model
+      : entry.launchProfile?.model ?? undefined,
     effort: entry.launchProfile?.effort ?? undefined,
     permissionMode: effectiveClaudePermissionMode(entry.launchProfile ?? {}),
   };

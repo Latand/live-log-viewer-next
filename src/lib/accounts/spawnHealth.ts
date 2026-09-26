@@ -6,7 +6,7 @@ import { gatingWindows } from "@/lib/accounts/migration/quotaPolicy";
 import { fetchClaudeLimits } from "@/lib/limits";
 import { LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits } from "@/lib/types";
 
-import { listClaudeAccounts, UnknownClaudeAccountError, type ClaudeAccount } from "./claude";
+import { listClaudeAccounts, listClaudeProviderModels, readClaudeProviderToken, UnknownClaudeAccountError, type ClaudeAccount } from "./claude";
 import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
 import { accountProbeIdentity, accountProbeSnapshot, claudeProbeCredentialIdentity, AccountMutationBusyError, withAccountMutationLockAsync } from "./accountMutation";
 
@@ -71,7 +71,7 @@ export class NoHealthyClaudeAccountError extends Error {
   /** Accounts are named by the label the Accounts panel shows ("Main"), never
       by their internal id ("default"): the message tells the operator which
       row to sign back in on (#2170). A bare id is its own label. */
-  constructor(accounts: ReadonlyArray<string | Pick<ClaudeAccount, "id" | "label">>) {
+  constructor(accounts: ReadonlyArray<string | (Pick<ClaudeAccount, "id" | "label"> & Partial<Pick<ClaudeAccount, "provider">>)>) {
     const byId = new Map<string, string>();
     for (const account of accounts) {
       const id = typeof account === "string" ? account : account.id;
@@ -81,7 +81,9 @@ export class NoHealthyClaudeAccountError extends Error {
     const ids = [...byId.keys()].sort();
     const labels = ids.map((id) => byId.get(id)!);
     const target = labels.length === 1 ? labels[0] : labels.length > 1 ? `${labels.slice(0, -1).join(", ")} or ${labels.at(-1)}` : "a Claude account";
-    super(`No healthy Claude account is available. Re-login ${target} in Accounts and retry.`);
+    super(accounts.length > 0 && accounts.every((account) => typeof account !== "string" && account.provider)
+      ? `No healthy Claude provider account is available. Check the provider token for ${target} in Accounts and retry.`
+      : `No healthy Claude account is available. Re-login ${target} in Accounts and retry.`);
     this.name = "NoHealthyClaudeAccountError";
     this.accountIds = ids;
   }
@@ -205,10 +207,11 @@ export async function selectHealthyClaudeAccount(
     ? claudeValidityFromLimitRead(result.limitRead, now, model)
     : result;
   const classified = accounts.map((account) => {
+    if (account.provider) return { account, oauth: null, unknown: false, provider: true };
     const metadata = claudeOauthMetadata(account);
     const unknown = metadata === "unknown";
     if (unknown && pinPreferred && account.id === preferredId) throw new ClaudeCredentialUnavailableError();
-    return { account, oauth: unknown ? null : metadata, unknown };
+    return { account, oauth: unknown ? null : metadata, unknown, provider: false };
   });
   type Evaluated = { account: ClaudeAccount; admission: SpawnAccountAdmission };
   const unknownAccounts = new Set(classified.filter((candidate) => candidate.unknown).map((candidate) => candidate.account.id));
@@ -241,10 +244,20 @@ export async function selectHealthyClaudeAccount(
     ...(pinPreferred && preferredId && requested ? { requestedAdmission: requested.admission } : {}),
   });
 
-  const current = (await Promise.all(classified
+  const providers = classified.filter((candidate) => candidate.provider);
+  const providerCurrent: Evaluated[] = providers.length ? await Promise.all(providers.map(async ({ account }) => {
+    const token = readClaudeProviderToken(account.home);
+    let authentication: "authenticated" | "failed" = token ? "authenticated" : "failed";
+    if (token && account.provider) {
+      try { await listClaudeProviderModels(account.provider, token); }
+      catch (error) { if (error instanceof Error && error.message === "Provider authentication failed") authentication = "failed"; }
+    }
+    return { account, admission: classifySpawnAccountAdmission({ enabled: true, authentication, limits: "unknown", stale: false, retryAt: null }, now) };
+  })) : [];
+  const current = [...providerCurrent, ...(await Promise.all(classified
     .filter((candidate) => candidate.oauth && candidate.oauth.expiresAt > now)
     .map(({ account }) => evaluate(account, dependencies.probe))))
-    .filter((candidate) => candidate !== null);
+    .filter((candidate) => candidate !== null)];
   let requested = preferredId ? current.find((candidate) => candidate.account.id === preferredId) ?? null : null;
   if (pinPreferred && requested?.admission.kind === "admissible") return result(requested, requested);
 

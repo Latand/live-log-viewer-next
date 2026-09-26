@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { accountsCollectionRevision } from "@/lib/accounts/accountsStore";
 
-import { activeClaudeAccountId, listClaudeAccounts, type ClaudeAccount } from "@/lib/accounts/claude";
+import { activeClaudeAccountId, listClaudeAccounts, listClaudeProviderModels, readClaudeProviderToken, type ClaudeAccount } from "@/lib/accounts/claude";
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
 import { accountProbeIdentity, claudeProbeCredentialIdentity, withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { activeCodexAccountId, listCodexAccounts, type CodexAccount } from "@/lib/accounts/codex";
@@ -96,10 +96,23 @@ export function durableQuotaObservation(observation: QuotaObservation, bootId: s
  * predate.
  */
 export async function claudeQuotaObservation(
-  account: Pick<ClaudeAccount, "id" | "home">,
+  account: Pick<ClaudeAccount, "id" | "home" | "provider" | "authPresent">,
   now: number,
   options: QuotaProbeOptions & { authStatus?: (home: string) => Promise<{ loggedIn: boolean; indeterminate?: boolean }> } = {},
 ): Promise<QuotaObservation> {
+  if (account.provider) {
+    const token = readClaudeProviderToken(account.home);
+    let authenticated = Boolean(token);
+    let reason = authenticated ? "provider limits unknown" : "provider credential unavailable";
+    if (token) {
+      try { await listClaudeProviderModels(account.provider, token); }
+      catch (error) { if (error instanceof Error && error.message === "Provider authentication failed") { authenticated = false; reason = "provider authentication failed"; } }
+    }
+    return {
+      engine: "claude", accountId: account.id, authenticated, authCheckedAt: now, limits: null,
+      provenance: { source: "unavailable", reason, staleSince: null }, observedAt: now,
+    };
+  }
   const status = options.authStatus ?? realClaudeLoginPorts.status;
   const auth = await status(account.home).catch(() => ({ loggedIn: false, indeterminate: true }));
   /* An indeterminate status read observed nothing about the account —
@@ -133,7 +146,7 @@ const productionProbe: QuotaProbePort = {
   list: (engine) => engine === "claude" ? listClaudeAccounts() : engine === "codex" ? listCodexAccounts() : listCopilotAccounts(),
   active: (engine) => engine === "claude" ? activeClaudeAccountId() : engine === "codex" ? activeCodexAccountId() : activeCopilotAccountId() ?? "",
   credentialIdentity: (engine, account) => engine === "claude"
-    ? claudeProbeCredentialIdentity(account.home)
+    ? (account as ClaudeAccount).provider ? accountProbeIdentity(account) : claudeProbeCredentialIdentity(account.home)
     : engine === "copilot" ? copilotProbeIdentity(account as CopilotAccount) : accountProbeIdentity(account),
   async probe(engine, account, now, options) {
     if (engine === "claude") return await claudeQuotaObservation(account as ClaudeAccount, now, options);

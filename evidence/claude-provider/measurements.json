@@ -1,0 +1,950 @@
+{
+  "commit": "working-tree",
+  "case": "provider-account",
+  "firstRunMarker": null,
+  "desktop-1280-light-en:engines-one-connected:otherSmallTargets": [],
+  "desktop-1280-light-en:engines-provider-form:otherSmallTargets": [],
+  "desktop-1280-light-en:engines-provider-edit:otherSmallTargets": [],
+  "desktop-1280-light-en": {
+    "engines-one-connected": {
+      "viewport": {
+        "w": 1280,
+        "h": 900
+      },
+      "dialog": {
+        "x": 180,
+        "y": 130,
+        "w": 920,
+        "h": 640
+      },
+      "scroller": {
+        "scrollWidth": 199,
+        "clientWidth": 199
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Continue",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Which engines can run here",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": "number",
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "2 accounts · Main is active",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Not installed",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Not installed",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Step 1 of 4",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-form": {
+      "viewport": {
+        "w": 1280,
+        "h": 900
+      },
+      "dialog": {
+        "x": 180,
+        "y": 130,
+        "w": 920,
+        "h": 640
+      },
+      "scroller": {
+        "scrollWidth": 199,
+        "clientWidth": 199
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Continue",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Which engines can run here",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": "number",
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "2 accounts · Main is active",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Not installed",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Not installed",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Step 1 of 4",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-edit": {
+      "viewport": {
+        "w": 1280,
+        "h": 900
+      },
+      "dialog": {
+        "x": 180,
+        "y": 130,
+        "w": 920,
+        "h": 640
+      },
+      "scroller": {
+        "scrollWidth": 199,
+        "clientWidth": 199
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Continue",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Which engines can run here",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": "number",
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "2 accounts · Main is active",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Not installed",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Not installed",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Step 1 of 4",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    }
+  },
+  "desktop-1280-light-uk:engines-one-connected:otherSmallTargets": [],
+  "desktop-1280-light-uk:engines-provider-form:otherSmallTargets": [],
+  "desktop-1280-light-uk:engines-provider-edit:otherSmallTargets": [],
+  "desktop-1280-light-uk": {
+    "engines-one-connected": {
+      "viewport": {
+        "w": 1280,
+        "h": 900
+      },
+      "dialog": {
+        "x": 180,
+        "y": 130,
+        "w": 920,
+        "h": 640
+      },
+      "scroller": {
+        "scrollWidth": 199,
+        "clientWidth": 199
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Далі",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Які рушії тут працюють",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": "number",
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "Акаунтів: 2 · активний — Main",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Не встановлено",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Не встановлено",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Крок 1 з 4",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-form": {
+      "viewport": {
+        "w": 1280,
+        "h": 900
+      },
+      "dialog": {
+        "x": 180,
+        "y": 130,
+        "w": 920,
+        "h": 640
+      },
+      "scroller": {
+        "scrollWidth": 199,
+        "clientWidth": 199
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Далі",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Які рушії тут працюють",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": "number",
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "Акаунтів: 2 · активний — Main",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Не встановлено",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Не встановлено",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Крок 1 з 4",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-edit": {
+      "viewport": {
+        "w": 1280,
+        "h": 900
+      },
+      "dialog": {
+        "x": 180,
+        "y": 130,
+        "w": 920,
+        "h": 640
+      },
+      "scroller": {
+        "scrollWidth": 199,
+        "clientWidth": 199
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Далі",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Які рушії тут працюють",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": "number",
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "Акаунтів: 2 · активний — Main",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Не встановлено",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Не встановлено",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Крок 1 з 4",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    }
+  },
+  "phone-390-light-en:engines-one-connected:otherSmallTargets": [
+    "button \"Add\" 27px"
+  ],
+  "phone-390-light-en:engines-provider-form:otherSmallTargets": [
+    "button \"Add\" 27px"
+  ],
+  "phone-390-light-en:engines-provider-edit:otherSmallTargets": [
+    "button \"Add\" 27px"
+  ],
+  "phone-390-light-en": {
+    "engines-one-connected": {
+      "viewport": {
+        "w": 390,
+        "h": 844
+      },
+      "dialog": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844
+      },
+      "scroller": {
+        "scrollWidth": 390,
+        "clientWidth": 390
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Continue",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [
+        "button \"Add\" 27px"
+      ],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Which engines can run here",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": null,
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "2 accounts · Main is active",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Not installed",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Not installed",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Step 1 of 4 · Engines",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-form": {
+      "viewport": {
+        "w": 390,
+        "h": 844
+      },
+      "dialog": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844
+      },
+      "scroller": {
+        "scrollWidth": 390,
+        "clientWidth": 390
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Continue",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [
+        "button \"Add\" 27px"
+      ],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Which engines can run here",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": null,
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "2 accounts · Main is active",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Not installed",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Not installed",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Step 1 of 4 · Engines",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-edit": {
+      "viewport": {
+        "w": 390,
+        "h": 844
+      },
+      "dialog": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844
+      },
+      "scroller": {
+        "scrollWidth": 390,
+        "clientWidth": 390
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Continue",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [
+        "button \"Add\" 27px"
+      ],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Which engines can run here",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": null,
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "2 accounts · Main is active",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Not installed",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Not installed",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Step 1 of 4 · Engines",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    }
+  },
+  "phone-390-light-uk:engines-one-connected:otherSmallTargets": [
+    "button \"Додати\" 27px"
+  ],
+  "phone-390-light-uk:engines-provider-form:otherSmallTargets": [
+    "button \"Додати\" 27px"
+  ],
+  "phone-390-light-uk:engines-provider-edit:otherSmallTargets": [
+    "button \"Додати\" 27px"
+  ],
+  "phone-390-light-uk": {
+    "engines-one-connected": {
+      "viewport": {
+        "w": 390,
+        "h": 844
+      },
+      "dialog": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844
+      },
+      "scroller": {
+        "scrollWidth": 390,
+        "clientWidth": 390
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Далі",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [
+        "button \"Додати\" 27px"
+      ],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Які рушії тут працюють",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": null,
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "Акаунтів: 2 · активний — Main",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Не встановлено",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Не встановлено",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Крок 1 з 4 · Рушії",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-form": {
+      "viewport": {
+        "w": 390,
+        "h": 844
+      },
+      "dialog": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844
+      },
+      "scroller": {
+        "scrollWidth": 390,
+        "clientWidth": 390
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Далі",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [
+        "button \"Додати\" 27px"
+      ],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Які рушії тут працюють",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": null,
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "Акаунтів: 2 · активний — Main",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Не встановлено",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Не встановлено",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Крок 1 з 4 · Рушії",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    },
+    "engines-provider-edit": {
+      "viewport": {
+        "w": 390,
+        "h": 844
+      },
+      "dialog": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844
+      },
+      "scroller": {
+        "scrollWidth": 390,
+        "clientWidth": 390
+      },
+      "documentOverflowX": 0,
+      "roleLabels": [],
+      "footerButtons": [
+        {
+          "text": "Далі",
+          "clipped": false,
+          "inside": true
+        }
+      ],
+      "segmentOverflow": 0,
+      "smallTargets": [
+        "button \"Додати\" 27px"
+      ],
+      "engines": {
+        "claude": "connected",
+        "codex": "missing",
+        "copilot": "missing"
+      },
+      "blockedRows": 0,
+      "banner": null,
+      "receipt": null,
+      "nudges": 0,
+      "costClasses": [],
+      "heading": "Які рушії тут працюють",
+      "plainRowHeights": [],
+      "chipOffsets": [],
+      "headrooms": [],
+      "changedRows": 0,
+      "retired": [],
+      "legendFirst": false,
+      "modelSelectWidths": [],
+      "selectedSegmentRing": null,
+      "enginesStepMark": null,
+      "clippedControls": [],
+      "accounts": {
+        "claude": {
+          "header": "Акаунтів: 2 · активний — Main",
+          "rows": 2,
+          "addRow": true
+        },
+        "codex": {
+          "header": "Не встановлено",
+          "rows": 1,
+          "addRow": true
+        },
+        "copilot": {
+          "header": "Не встановлено",
+          "rows": 0,
+          "addRow": false
+        }
+      },
+      "filledButtons": [],
+      "filledOnScreen": [],
+      "tourBandOnScreen": null,
+      "tourStartInView": null,
+      "tourLinksInView": null,
+      "stepCounter": "Крок 1 з 4 · Рушії",
+      "phone": null,
+      "voice": null,
+      "tour": null,
+      "health": null
+    }
+  },
+  "failures": []
+}

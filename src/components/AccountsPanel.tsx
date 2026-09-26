@@ -751,6 +751,60 @@ function RemovalOutcome({ state, phone = false }: { state: EngineAccountsState; 
   }
 }
 
+/** The token stays in this form until submission and is never put in a row or URL. */
+function ClaudeProviderEditor({ state, account, phone = false }: { state: EngineAccountsState; account?: AccountOption; phone?: boolean }) {
+  const { t } = useLocale();
+  const [open, setOpen] = useState(false);
+  const [label, setLabel] = useState(account?.label ?? "");
+  const [baseUrl, setBaseUrl] = useState(account?.provider?.baseUrl ?? "https://opencode.ai/zen/go");
+  const [token, setToken] = useState("");
+  const [model, setModel] = useState(account?.provider?.model ?? "");
+  const [smallFastModel, setSmallFastModel] = useState(account?.provider?.smallFastModel ?? "");
+  const [models, setModels] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const provider = { baseUrl, model: model || "model-for-list", smallFastModel, ...(token ? { token } : {}) };
+  const request = async (action: "provider-models" | "save") => {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/accounts/claude", {
+        method: action === "save" && account ? "PATCH" : "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(action === "provider-models"
+          ? { action, id: account?.id, provider }
+          : { id: account?.id, label, provider: { ...provider, model } }),
+      });
+      const body = await response.json() as { error?: string; models?: string[] | null; account?: { id?: string } };
+      if (!response.ok) { setError(body.error ?? t("accounts.provider.error")); return; }
+      if (action === "provider-models") { setModels(body.models ?? []); return; }
+      const selectNew = !account && !state.accounts.some((candidate) => candidate.id === state.active && candidate.authPresent);
+      setToken(""); setOpen(false); await state.refresh();
+      if (selectNew && body.account?.id) await state.select(body.account.id);
+    } catch { setError(t("accounts.provider.error")); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className={phone ? "px-3 pb-2" : "border-t border-border px-3 py-2"} data-claude-provider-editor={account?.id ?? "new"}>
+      <button type="button" className="min-h-11 text-[11px] font-semibold text-accent underline underline-offset-2 sm:min-h-6" onClick={() => setOpen(!open)}>
+        {account ? t("accounts.provider.edit") : t("accounts.provider.add")}
+      </button>
+      {open ? <div className="mt-2 grid gap-2">
+        <input aria-label={t("accounts.provider.name")} placeholder={t("accounts.provider.name")} value={label} onChange={(event) => setLabel(event.target.value)} className="min-h-11 w-full rounded border border-border bg-canvas px-2 py-1 text-xs sm:min-h-8" />
+        <input aria-label={t("accounts.provider.url")} placeholder="https://opencode.ai/zen/go" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} className="min-h-11 w-full rounded border border-border bg-canvas px-2 py-1 text-xs sm:min-h-8" />
+        <input aria-label={t("accounts.provider.token")} type={"password"} autoComplete="off" placeholder={account ? t("accounts.provider.keepToken") : t("accounts.provider.token")} value={token} onChange={(event) => setToken(event.target.value)} className="min-h-11 w-full rounded border border-border bg-canvas px-2 py-1 text-xs sm:min-h-8" />
+        <input aria-label={t("accounts.provider.model")} list={`claude-provider-models-${account?.id ?? "new"}`} placeholder={t("accounts.provider.model")} value={model} onChange={(event) => setModel(event.target.value)} className="min-h-11 w-full rounded border border-border bg-canvas px-2 py-1 text-xs sm:min-h-8" />
+        <input aria-label={t("accounts.provider.smallModel")} list={`claude-provider-models-${account?.id ?? "new"}`} placeholder={t("accounts.provider.smallModel")} value={smallFastModel} onChange={(event) => setSmallFastModel(event.target.value)} className="min-h-11 w-full rounded border border-border bg-canvas px-2 py-1 text-xs sm:min-h-8" />
+        <datalist id={`claude-provider-models-${account?.id ?? "new"}`}>{models.map((id) => <option key={id} value={id} />)}</datalist>
+        <div className="flex gap-2">
+          <button type="button" disabled={busy || !baseUrl || (!account && !token)} onClick={() => void request("provider-models")} className="min-h-11 rounded border border-border px-2 py-1 text-xs disabled:opacity-50 sm:min-h-8">{t("accounts.provider.loadModels")}</button>
+          <button type="button" disabled={busy || !label.trim() || !baseUrl || !model || (!account && !token)} onClick={() => void request("save")} className="min-h-11 rounded border border-border px-2 py-1 text-xs font-semibold disabled:opacity-50 sm:min-h-8">{t("accounts.provider.save")}</button>
+        </div>
+        {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
+      </div> : null}
+    </div>
+  );
+}
+
 /**
  * Unified, engine-parameterized Accounts panel. Symmetric for Claude and Codex:
  * account list with capacity chips, direct active-account selection, clear
@@ -895,8 +949,7 @@ export function AccountsPanel({
                 const showLimits = account.authPresent || Boolean(quota.session || quota.weekly || quota.tiers.length);
                 return (
                   <AccountRow key={account.id} account={account} engine={engine} quota={quota} activeId={active} disabled={mutation !== null} removing={state.removing === account.id} refusal={rowRefusal(state, account.id)} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} onCopyCommand={() => void state.copyTerminalCommand(account.id)}>
-                    {showLimits ? (
-                      <AccountLimitsBlock
+                    {showLimits ? account.provider ? <div className="px-3 pb-2 pl-[30px] text-[10px] text-muted">{t("accounts.provider.limitsUnknown")}</div> : <AccountLimitsBlock
                         account={account}
                         engine={engine}
                         quota={quota}
@@ -906,9 +959,9 @@ export function AccountsPanel({
                         wideLabels={wideLabels}
                         onRefresh={() => void state.refreshLimits(account.id)}
                         onUseReset={() => void state.useResetCredit(account.id)}
-                      />
-                    ) : null}
-                    {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
+                      /> : null}
+                    {engine === "claude" && account.provider ? <ClaudeProviderEditor state={state} account={account} /> : null}
+                    {engine === "claude" && !account.provider ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
                   </AccountRow>
                 );
               })}
@@ -928,6 +981,7 @@ export function AccountsPanel({
                 {t("accounts.confirmAdd")}
               </button>
             </form>
+            {engine === "claude" ? <ClaudeProviderEditor state={state} /> : null}
             <div className="flex justify-end border-t border-border px-3 py-1.5">
               <button
                 type="button"
@@ -1024,7 +1078,7 @@ export function mobileAccountCorner(quota: ReconciledQuota, t: TFunction): { lef
     account, and Codex runs its device login for any account, Main included
     (#2166): signing in the account you have never asks for a second one. */
 function mobileSignInAvailable(engine: "claude" | "codex", account: AccountOption): boolean {
-  return engine === "claude" || account.kind === "managed" || account.kind === "legacy";
+  return !account.provider && (engine === "claude" || account.kind === "managed" || account.kind === "legacy");
 }
 
 /** Codex keeps its device-login contract on the accounts route (`action:
@@ -1231,6 +1285,7 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
         {engine === "claude" && state === "needsSignIn" && account.login?.result?.status === "failure"
           ? <ClaudeLoginRow key={account.login.operationId} account={account} state={engineState} loginBusy={loginBusy} />
           : null}
+        {engine === "claude" && account.provider ? <ClaudeProviderEditor state={engineState} account={account} phone /> : null}
         {rowRefusal(engineState, account.id, true)}
       </div>
     );
@@ -1248,7 +1303,7 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
       <div className={rowClass}>
         <MobileAccountHead account={account} engine={engine} state={state} quota={quota} t={t} />
       </div>
-      <dl data-account-limits={account.id} aria-label={t("accounts.limitsAria", { label: account.label })} className="flex flex-col gap-[5px] pr-2 pt-0.5">
+      {account.provider ? <div className="py-1 text-label text-muted">{t("accounts.provider.limitsUnknown")}</div> : <dl data-account-limits={account.id} aria-label={t("accounts.limitsAria", { label: account.label })} className="flex flex-col gap-[5px] pr-2 pt-0.5">
         {rows.length === 0 ? <div className="text-label text-muted">{t("mobile2.accounts.noReading")}</div> : null}
         {rows.map(({ key, label, window }) => {
           const w = window.value;
@@ -1267,7 +1322,7 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
             </div>
           );
         })}
-      </dl>
+      </dl>}
       {engine === "codex" ? (
         <div data-account-reset-credits={account.id} className={`pr-2 pt-1 text-label ${canRedeem ? "font-semibold text-primary" : "text-muted"}`}>
           {resets === null
@@ -1278,7 +1333,7 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
           {resets !== null && resets.availableCount > 0 && resets.expiresAt !== null ? ` · ${t("accounts.resetsExpire", { at: formatResetClock(resets.expiresAt, now) })}` : null}
         </div>
       ) : null}
-      <div className="mt-0.5 flex items-center gap-1">
+      {!account.provider ? <div className="mt-0.5 flex items-center gap-1">
         <button
           type="button"
           data-account-refresh-limits={account.id}
@@ -1305,7 +1360,8 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
             {t("accounts.useReset")}
           </button>
         ) : null}
-      </div>
+      </div> : null}
+      {engine === "claude" && account.provider ? <ClaudeProviderEditor state={engineState} account={account} phone /> : null}
       {rowRefusal(engineState, account.id, true)}
     </div>
   );
@@ -1445,6 +1501,7 @@ function MobileEngineSection({ state, now, focusAccountId, receipts }: { state: 
         </div>
       ) : null}
       <MobileAddAccountRow state={state} engineName={engineName} loginBusy={loginBusy} />
+      {engine === "claude" ? <ClaudeProviderEditor state={state} phone /> : null}
     </section>
   );
 }

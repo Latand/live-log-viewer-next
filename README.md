@@ -45,6 +45,12 @@ These steps take you from nothing to an orchestrator working on your project.
 4. Open `http://127.0.0.1:8898/` if your browser did not open it for you.
 5. Follow the setup guide. It signs you in to your agent CLIs, asks for a
    project folder and creates the project's orchestrator.
+   If you use an Anthropic Messages compatible provider, choose **Add compatible
+   provider** under Claude accounts. Enter its base URL, token, default model
+   ID and optional small/fast model ID. **Load models** reads the provider's
+   catalogue when available. For OpenCode Go, the base URL is
+   `https://opencode.ai/zen/go`. The token stays in a private account file;
+   provider usage limits remain unknown.
 6. Tell the orchestrator what you want done.
 
 Copilot runs single agents; it cannot run the orchestrator. To keep a

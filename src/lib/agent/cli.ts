@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
-import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
+import { claudeProviderForHome, claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 import { homeDirectory } from "@/lib/platformHome";
 import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
 import { telegramSessionReaderPath } from "@/lib/telegram/packaging";
@@ -212,8 +212,21 @@ function telegramScopedCommand(command: string, mcpServers: readonly string[]): 
 }
 
 export function claudeEnvPrefix(home: string, mcpServers: readonly string[] = []): string {
-  const unsets = mcpServers.includes("telegram") ? CLAUDE_SHADOWED_ENV : [...CLAUDE_SHADOWED_ENV, TELEGRAM_CONNECTOR_TOKEN_ENV];
-  return `env ${unsets.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`;
+  const provider = claudeProviderForHome(home);
+  const unsets = [
+    ...CLAUDE_SHADOWED_ENV,
+    ...(mcpServers.includes("telegram") ? [] : [TELEGRAM_CONNECTOR_TOKEN_ENV]),
+    ...(provider ? ["ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"] : []),
+  ];
+  const providerEnv = provider
+    ? ` ANTHROPIC_BASE_URL=${shellQuote(provider.baseUrl)} ANTHROPIC_MODEL=${shellQuote(provider.model)}${provider.smallFastModel ? ` ANTHROPIC_SMALL_FAST_MODEL=${shellQuote(provider.smallFastModel)}` : ""} sh -c ${shellQuote('ANTHROPIC_AUTH_TOKEN=$(cat -- "$1") || exit 1; [ -n "$ANTHROPIC_AUTH_TOKEN" ] || exit 1; export ANTHROPIC_AUTH_TOKEN; shift; exec "$@"')} sh ${shellQuote(path.join(home, ".provider-token"))}`
+    : "";
+  return `env ${unsets.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}${providerEnv}`;
+}
+
+function providerLaunchModel(home: string, requested: string | null | undefined): string | null {
+  const provider = claudeProviderForHome(home);
+  return provider ? requested === "haiku" && provider.smallFastModel ? provider.smallFastModel : provider.model : requested ?? null;
 }
 
 function codexEnvPrefix(home: string, mcpServers: readonly string[]): string {
@@ -333,7 +346,8 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     else if (permissionMode === "bypassPermissions") args.push("--dangerously-skip-permissions");
     else args.push("--permission-mode", permissionMode);
     args.push("--session-id", sid);
-    if (options.model) args.push("--model", options.model);
+    const launchModel = providerLaunchModel(options.claudeConfigDir ?? legacyClaudeHome(), options.model);
+    if (launchModel) args.push("--model", launchModel);
     if (options.effort) args.push("--effort", options.effort);
     const managed = Boolean(options.claudeConfigDir && isManagedClaudeHome(options.claudeConfigDir));
     const installedPolicy = options.claudeConfigDir
@@ -539,7 +553,7 @@ export function resumeSpecForSession(
       args.push("--dangerously-skip-permissions");
     }
     pushClaudePolicyArgs(args, policy);
-    const launchModel = normalizeClaudeLaunchModel(options.model);
+    const launchModel = providerLaunchModel(home, normalizeClaudeLaunchModel(options.model));
     if (launchModel) args.push("--model", launchModel);
     if (options.effort) args.push("--effort", options.effort);
     args.push("--resume", sessionId);

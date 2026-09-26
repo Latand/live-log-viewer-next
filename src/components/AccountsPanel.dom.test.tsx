@@ -92,6 +92,22 @@ function dispatch(target: EventTarget, event: unknown): boolean {
   return target.dispatchEvent(event as Event);
 }
 
+test("provider account controls render on the account row without exposing its token", async () => {
+  const view = await mount(state(login(), {
+    accounts: [{ id: "provider", label: "Provider", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null, provider: { baseUrl: "https://example.invalid/anthropic", model: "large", smallFastModel: "small" } }],
+    active: "provider",
+  }));
+  mounted.push(view);
+  const editor = view.host.querySelector('[data-claude-provider-editor="provider"]') as HTMLElement;
+  expect(editor).not.toBeNull();
+  expect(view.host.textContent).toContain("Provider limits unknown");
+  expect(view.host.textContent).not.toContain("Authorization code");
+  flushSync(() => dispatch(editor.querySelector("button")!, new dom.MouseEvent("click", { bubbles: true })));
+  expect((editor.querySelector('input[aria-label="Provider token"]') as HTMLInputElement).type).toBe("password");
+  expect((editor.querySelector('input[aria-label="Default model ID"]') as HTMLInputElement).value).toBe("large");
+  expect(editor.innerHTML).not.toContain("local-provider-fixture-token");
+});
+
 test("keyboard Submit code restores focus to the Claude sign-in row after it enters verifying", async () => {
   let submitted: { operationId: string; code: string } | null = null;
   const initial = state(login(), {

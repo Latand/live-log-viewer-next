@@ -26,7 +26,7 @@ function deleteRequest(body: unknown) {
     method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify(body),
   });
 }
-const { DELETE: remove, POST } = await import("./route");
+const { DELETE: remove, PATCH, POST } = await import("./route");
 const { DELETE } = await import("./login/[operationId]/route");
 const { POST: submitInput } = await import("./login/[operationId]/input/route");
 
@@ -80,6 +80,51 @@ test("POST starts Claude login in a clean environment with the shared operation 
     login: expect.objectContaining({ phase: "awaiting_browser", result: null }),
     target: "claude-auth-login",
   }));
+});
+
+test("provider create and edit read a model catalogue and never return the token", async () => {
+  const secret = ["local", "route", "fixture", "token"].join("-");
+  let sawToken = false;
+  let modelPath = "";
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    sawToken = request.headers.get("authorization") === `Bearer ${secret}`;
+    modelPath = new URL(request.url).pathname;
+    return Response.json({ data: [{ id: "provider-large" }, { id: "provider-small" }] });
+  } });
+  const request = (method: "POST" | "PATCH", body: unknown) => new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method, headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    const config = { baseUrl: `http://127.0.0.1:${server.port}/zen/go`, model: "provider-large", smallFastModel: "provider-small", token: secret };
+    const created = await POST(request("POST", { label: "Provider", provider: config }));
+    expect(created.status).toBe(201);
+    const body = await created.text();
+    expect(body).not.toContain(secret);
+    expect(JSON.parse(body).models).toEqual(["provider-large", "provider-small"]);
+    expect(sawToken).toBe(true);
+    expect(modelPath).toBe("/zen/go/v1/models");
+    const id = JSON.parse(body).account.id as string;
+    const edited = await PATCH(request("PATCH", { id, label: "Updated", provider: { ...config, token: undefined, smallFastModel: null } }));
+    expect(edited.status).toBe(200);
+    expect(await edited.text()).not.toContain(secret);
+    expect(listClaudeAccounts().find((account) => account.id === id)?.label).toBe("Updated");
+    const models = await POST(request("POST", { action: "provider-models", id, provider: { ...config, token: undefined } }));
+    expect(models.status).toBe(200);
+    expect(sawToken).toBe(true);
+  } finally { server.stop(); }
+});
+
+test("provider authentication failure stays on the account form", async () => {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { return new Response(null, { status: 401 }); } });
+  try {
+    const response = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+      method: "POST", headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ label: "Rejected", provider: { baseUrl: `http://127.0.0.1:${server.port}`, token: "fixture-token", model: "fixture-model" } }),
+    }));
+    expect(response.status).toBe(401);
+    expect((await response.json()).code).toBe("provider_auth_failed");
+    expect(listClaudeAccounts().some((account) => account.label === "Rejected")).toBe(false);
+  } finally { server.stop(); }
 });
 
 test("one login is admitted at a time, then cancel and retry create a fresh operation", async () => {

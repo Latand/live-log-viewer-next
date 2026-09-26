@@ -141,6 +141,8 @@ export type AccountOption = {
   label: string;
   /** Managed accounts own the sign-in/retry affordances; legacy ones never do. */
   kind?: "legacy" | "managed";
+  /** Public endpoint configuration; the provider token never reaches this type. */
+  provider?: { baseUrl: string; model: string; smallFastModel: string | null };
   authPresent: boolean;
   authHealth?: AccountAuthHealth;
   /** Public subscription tier reported by the account read. */

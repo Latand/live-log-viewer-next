@@ -61,6 +61,8 @@ export type AccountContext = {
   home: string;
   transcriptRoot: string;
   env: NodeJS.ProcessEnv;
+  /** Public configuration only. The credential is confined to env at launch. */
+  claudeProvider?: { baseUrl: string; model: string; smallFastModel: string | null };
 };
 
 export type HeadlessSpawnAvailability =

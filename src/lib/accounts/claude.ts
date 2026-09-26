@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -15,7 +16,7 @@ const DEFAULT_ID = "default";
 const VERSION = 1;
 const CAPABILITY_DIRS = ["skills", "commands", "agents"] as const;
 const CAPABILITY_FILES = ["settings.json"] as const;
-const PRIVATE_NAMES = new Set([".credentials.json", ".claude.json", "projects", "history.jsonl", "session-env", "shell-snapshots", "file-history", "todos", "cache", "debug", "backups", "paste-cache", "plugins", "mcp.json", "settings.local.json"]);
+const PRIVATE_NAMES = new Set([".credentials.json", ".provider-token", ".claude.json", "projects", "history.jsonl", "session-env", "shell-snapshots", "file-history", "todos", "cache", "debug", "backups", "paste-cache", "plugins", "mcp.json", "settings.local.json"]);
 const MAX_CAPABILITY_FILES = 2_000;
 const MAX_CAPABILITY_BYTES = 16 * 1024 * 1024;
 const REGISTRY_LOCK_WAIT_MS = 5_000;
@@ -29,10 +30,13 @@ export type ClaudeAccount = {
   projectsDir: string;
   authPresent: boolean;
   credentialState?: ClaudeCredentialRead["state"];
+  /** Secret-free configuration for an Anthropic Messages compatible endpoint. */
+  provider?: ClaudeProviderConfig;
   createdAt: number;
 };
 
-type StoredAccount = { id: string; label: string; kind: "managed"; createdAt: number };
+export type ClaudeProviderConfig = { baseUrl: string; model: string; smallFastModel: string | null };
+type StoredAccount = { id: string; label: string; kind: "managed"; createdAt: number; provider?: ClaudeProviderConfig };
 /** A removed account. `archived` leftovers live in the shared archive
     (issue #1857); older records kept their transcript tree in the home (#643). */
 type RetiredAccount = { id: string; label: string; retiredAt: number; archived?: true };
@@ -90,7 +94,44 @@ export function managedClaudeHomeIsSafe(id: string, requireExisting = false): bo
 function validStored(value: unknown): value is StoredAccount {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<StoredAccount>;
-  return typeof item.id === "string" && typeof item.label === "string" && item.kind === "managed" && typeof item.createdAt === "number" && managedClaudeHomeIsSafe(item.id);
+  return typeof item.id === "string" && typeof item.label === "string" && item.kind === "managed" && typeof item.createdAt === "number" && managedClaudeHomeIsSafe(item.id)
+    && (item.provider === undefined || validProviderConfig(item.provider));
+}
+
+function validProviderConfig(value: unknown): value is ClaudeProviderConfig {
+  if (!value || typeof value !== "object") return false;
+  const config = value as Partial<ClaudeProviderConfig>;
+  if (typeof config.baseUrl !== "string" || typeof config.model !== "string"
+    || !(config.smallFastModel === null || typeof config.smallFastModel === "string")) return false;
+  try { validateProviderConfig(config as ClaudeProviderConfig); return true; } catch { return false; }
+}
+
+export function validateProviderConfig(config: ClaudeProviderConfig): ClaudeProviderConfig {
+  const url = new URL(config.baseUrl);
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
+    || url.username || url.password || url.search || url.hash || !url.pathname) throw new Error("Invalid provider base URL");
+  const modelId = (value: string) => value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value) && value.trim() === value;
+  if (!modelId(config.model) || (config.smallFastModel !== null && !modelId(config.smallFastModel))) throw new Error("Invalid provider model id");
+  return { baseUrl: url.href.replace(/\/$/, ""), model: config.model, smallFastModel: config.smallFastModel };
+}
+
+const PROVIDER_TOKEN_FILE = ".provider-token";
+function providerTokenPath(home: string): string { return path.join(home, PROVIDER_TOKEN_FILE); }
+export function readClaudeProviderToken(home: string): string | null {
+  try {
+    const file = providerTokenPath(home);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1) return null;
+    const token = fs.readFileSync(file, "utf8");
+    return token && token.length <= 4096 && !/[\r\n\u0000]/.test(token) ? token : null;
+  } catch { return null; }
+}
+function writeProviderToken(home: string, token: string): void {
+  if (!token || token.length > 4096 || /[\r\n\u0000]/.test(token)) throw new Error("Invalid provider token");
+  const target = providerTokenPath(home);
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+  try { fs.writeFileSync(temporary, token, { mode: 0o600, flag: "wx" }); fs.renameSync(temporary, target); }
+  finally { fs.rmSync(temporary, { force: true }); }
 }
 
 function validRetired(value: unknown): value is RetiredAccount {
@@ -187,7 +228,7 @@ function credentialPresence(home: string): Pick<ClaudeAccount, "authPresent" | "
   const read = readClaudeCredentials(home);
   return { authPresent: read.state === "present", credentialState: read.state };
 }
-function account(stored: StoredAccount): ClaudeAccount { const home = managedHome(stored.id); return { ...stored, home, projectsDir: projectsDirFor(home), ...credentialPresence(home) }; }
+function account(stored: StoredAccount): ClaudeAccount { const home = managedHome(stored.id); return { ...stored, home, projectsDir: projectsDirFor(home), ...(stored.provider ? { authPresent: readClaudeProviderToken(home) !== null } : credentialPresence(home)) }; }
 function main(): ClaudeAccount { const home = legacyClaudeHome(); return { id: DEFAULT_ID, label: "Main", kind: "legacy", home, projectsDir: projectsDirFor(home), ...credentialPresence(home), createdAt: 0 }; }
 export function listClaudeAccounts(): ClaudeAccount[] { recoverRemovalsAtStartup(); return [main(), ...readRegistry().registry.accounts.map(account)]; }
 /** Routing needs persisted membership only; credential discovery may spawn Keychain. */
@@ -196,7 +237,7 @@ export function activeClaudeAccountId(): string {
   return !removals.some((item) => item.id === active) && accounts.some((item) => item.id === active) ? active : DEFAULT_ID;
 }
 export function claudeAccountsMutationLocked(): boolean { return readRegistry().corrupt; }
-export function claudeAccountForSpawn(requested?: string | null): Pick<ClaudeAccount, "id" | "kind" | "home" | "projectsDir"> { const found = listClaudeAccounts().find((item) => item.id === (requested ?? activeClaudeAccountId())); if (!found) throw new UnknownClaudeAccountError(requested ?? ""); if (found.kind === "managed" && (!managedClaudeHomeIsSafe(found.id, true) || !managedClaudeCredentialIsSafe(found.home))) throw new UnsafeClaudeHomeError(); return { id: found.id, kind: found.kind, home: found.home, projectsDir: found.projectsDir }; }
+export function claudeAccountForSpawn(requested?: string | null): Pick<ClaudeAccount, "id" | "kind" | "home" | "projectsDir" | "provider"> { const found = listClaudeAccounts().find((item) => item.id === (requested ?? activeClaudeAccountId())); if (!found) throw new UnknownClaudeAccountError(requested ?? ""); if (found.kind === "managed" && (!managedClaudeHomeIsSafe(found.id, true) || (found.provider ? !found.authPresent : !managedClaudeCredentialIsSafe(found.home)))) throw new UnsafeClaudeHomeError(); return { id: found.id, kind: found.kind, home: found.home, projectsDir: found.projectsDir, provider: found.provider }; }
 export function setActiveClaudeAccount(id: string): void {
   withAccountMutationLock(() => {
     const registry = mutable();
@@ -337,8 +378,9 @@ export function syncClaudeCapabilitySnapshot(): string {
 
 export function claudeSettingsPath(): string | null { const file = path.join(claudeCapabilitiesRoot(), "settings.json"); return fs.existsSync(file) ? file : null; }
 
-export function createManagedClaudeAccount(label: string): ClaudeAccount {
+export function createManagedClaudeAccount(label: string, provider?: { config: ClaudeProviderConfig; token: string }): ClaudeAccount {
   const clean = label.trim(); if (!clean || clean.length > 80 || /[\u0000-\u001f\u007f]/.test(clean)) throw new InvalidClaudeAccountLabelError();
+  const config = provider ? validateProviderConfig(provider.config) : undefined;
   return withRegistryLock(() => {
     const registry = mutable(); const id = nextId(clean, new Set([...listClaudeAccounts().map((item) => item.id), ...registry.retired.map((item) => item.id)])); const home = managedHome(id); let made = false;
     // A removed directory does not prove its platform credential is gone.
@@ -349,7 +391,8 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
       const shared = syncClaudeCapabilitySnapshot();
       for (const name of CAPABILITY_DIRS) { const source = path.join(shared, name); if (fs.existsSync(source)) fs.symlinkSync(source, path.join(home, name)); }
       fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
-      const stored: StoredAccount = { id, label: clean, kind: "managed", createdAt: Date.now() }; write({ ...registry, accounts: [...registry.accounts, stored] }); return account(stored);
+      if (provider) writeProviderToken(home, provider.token);
+      const stored: StoredAccount = { id, label: clean, kind: "managed", createdAt: Date.now(), ...(config ? { provider: config } : {}) }; write({ ...registry, accounts: [...registry.accounts, stored] }); return account(stored);
     } catch (error) {
       if (made) {
         try {
@@ -362,6 +405,48 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
       throw error;
     }
   });
+}
+
+export function updateProviderClaudeAccount(id: string, config: ClaudeProviderConfig, token?: string, label?: string): ClaudeAccount {
+  const checked = validateProviderConfig(config);
+  const clean = label?.trim();
+  if (label !== undefined && (!clean || clean.length > 80 || /[\u0000-\u001f\u007f]/.test(clean))) throw new InvalidClaudeAccountLabelError();
+  return withRegistryLock(() => {
+    const registry = mutable();
+    const index = registry.accounts.findIndex((item) => item.id === id && item.provider);
+    if (index < 0) throw new UnknownClaudeAccountError(id);
+    const home = managedHome(id);
+    if (!managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
+    const previousToken = readClaudeProviderToken(home);
+    if (!previousToken) throw new UnsafeClaudeHomeError();
+    const stored = { ...registry.accounts[index]!, ...(clean ? { label: clean } : {}), provider: checked };
+    try {
+      if (token !== undefined) writeProviderToken(home, token);
+      write({ ...registry, accounts: registry.accounts.map((item, n) => n === index ? stored : item) });
+    } catch (error) {
+      if (token !== undefined) {
+        try { writeProviderToken(home, previousToken); }
+        catch (rollbackError) { throw new AggregateError([error, rollbackError], "Provider account token rollback failed"); }
+      }
+      throw error;
+    }
+    return account(stored);
+  });
+}
+
+export async function listClaudeProviderModels(config: ClaudeProviderConfig, token: string): Promise<string[] | null> {
+  const checked = validateProviderConfig(config);
+  const response = await fetch(`${checked.baseUrl}/v1/models`, {
+    headers: { Authorization: `Bearer ${token}` },
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (response.status === 404 || response.status === 405) return null;
+  if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? "Provider authentication failed" : "Provider model list unavailable");
+  const payload = await response.json() as { data?: unknown; models?: unknown };
+  const models = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : null;
+  if (!models) return null;
+  return models.flatMap((item) => typeof item === "object" && item !== null && typeof item.id === "string" && item.id.length <= 128 ? [item.id] : []).slice(0, 500);
 }
 
 function historyFitsRetainedProjects(report: AccountHistoryInventoryReport): boolean {
@@ -572,4 +657,23 @@ export function cleanupOrphanedClaudeHomes(): AccountOrphanCleanupReport {
 
 const SHADOWED_ENV = ["CLAUDE_SECURESTORAGE_CONFIG_DIR","ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"];
 export function claudeManagedEnvironment(home: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv { const env: NodeJS.ProcessEnv = { ...withoutWakatimeCredential(base), CLAUDE_CONFIG_DIR: home }; for (const key of SHADOWED_ENV) delete env[key]; return env; }
+export function claudeAccountEnvironment(account: Pick<ClaudeAccount, "home" | "provider">, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = claudeManagedEnvironment(account.home, base);
+  if (account.provider) {
+    const token = readClaudeProviderToken(account.home);
+    if (!token) throw new UnsafeClaudeHomeError();
+    delete env.ANTHROPIC_MODEL;
+    delete env.ANTHROPIC_SMALL_FAST_MODEL;
+    env.ANTHROPIC_BASE_URL = account.provider.baseUrl;
+    env.ANTHROPIC_AUTH_TOKEN = token;
+    env.ANTHROPIC_MODEL = account.provider.model;
+    if (account.provider.smallFastModel) env.ANTHROPIC_SMALL_FAST_MODEL = account.provider.smallFastModel;
+  }
+  return env;
+}
+export function claudeProviderForHome(home: string): ClaudeProviderConfig | null {
+  const account = listClaudeAccounts().find((item) => item.home === home);
+  if (account?.provider && !account.authPresent) throw new UnsafeClaudeHomeError();
+  return account?.provider ?? null;
+}
 export function isManagedClaudeHome(home: string): boolean { return listClaudeAccounts().some((item) => item.kind === "managed" && item.home === home && managedClaudeHomeIsSafe(item.id, true)); }

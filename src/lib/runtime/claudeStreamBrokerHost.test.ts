@@ -163,6 +163,41 @@ function fakeSpawn(
   };
 }
 
+test("provider host forwards only its explicitly selected endpoint and token, including adoption", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-host-"));
+  const secret = ["local", "provider", "host", "fixture"].join("-");
+  const source = { ...process.env, ANTHROPIC_BASE_URL: "http://127.0.0.1:9876", ANTHROPIC_AUTH_TOKEN: secret, ANTHROPIC_MODEL: "model-large" };
+  try {
+    for (const resume of [false, true]) {
+      const child = new FakeClaude(new RecordingDeliveryLedger());
+      const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
+      const common = {
+        cwd: home, claudeConfigDir: home, env: source, providerAccount: true,
+        model: "model-large", readTranscript: () => [], spawnProcess: fakeSpawn(child, captured),
+        readAuthStatus: () => { throw new Error("provider must not ask Claude OAuth status"); },
+      };
+      const host = resume
+        ? await ClaudeStreamBrokerHost.adopt("12345678-1234-1234-1234-123456789abc", common)
+        : await ClaudeStreamBrokerHost.start({ ...common, sessionId: "12345678-1234-1234-1234-123456789abc" });
+      expect(captured.options?.env?.ANTHROPIC_AUTH_TOKEN).toBe(secret);
+      expect(captured.options?.env?.ANTHROPIC_BASE_URL).toBe(source.ANTHROPIC_BASE_URL);
+      expect(captured.args).toContain(resume ? "--resume" : "--session-id");
+      expect(JSON.stringify(captured.args)).not.toContain(secret);
+      await host.release();
+    }
+    const oauthChild = new FakeClaude(new RecordingDeliveryLedger());
+    const oauthCapture: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
+    const oauth = await ClaudeStreamBrokerHost.start({
+      sessionId: "87654321-1234-1234-1234-123456789abc", cwd: home, claudeConfigDir: home, env: source,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [], spawnProcess: fakeSpawn(oauthChild, oauthCapture),
+    });
+    expect(oauthCapture.options?.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(oauthCapture.options?.env?.ANTHROPIC_BASE_URL).toBeUndefined();
+    await oauth.release();
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 async function nextEvent(iterator: AsyncIterator<RuntimeEvent>): Promise<RuntimeEvent> {
   const next = await iterator.next();
   if (next.done) throw new Error("event stream ended");

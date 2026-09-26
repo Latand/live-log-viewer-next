@@ -1598,6 +1598,37 @@ export async function startCopilotStructuredHost(
     : await CopilotAcpHost.start(options);
 }
 
+/** Production option builder shared by fresh and resumed Claude hosts. */
+export function claudeStructuredHostOptions(
+  input: Pick<StructuredSpawnInput, "spec" | "account">,
+  access: Pick<StructuredHostAccessMaterialization, "env" | "host">,
+  initialEventCursor?: number,
+  validateTelegramGrant?: () => void,
+) {
+  const profile = input.spec.launchProfile ?? {} as LaunchProfile;
+  return {
+    cwd: input.spec.cwd,
+    claudeProjectsDir: input.account.transcriptRoot,
+    ...claudeHostLaunchPaths(input.account),
+    providerAccount: Boolean(input.account.claudeProvider),
+    allowSubagents: profile.allowSubagents,
+    mcpServers: profile.mcpServers,
+    validateTelegramGrant,
+    readOnly: launchProfileEngineReadOnly(profile),
+    restricted: profile.sandbox === "restricted",
+    model: input.account.claudeProvider
+      ? profile.model === "haiku" && input.account.claudeProvider.smallFastModel
+        ? input.account.claudeProvider.smallFastModel
+        : input.account.claudeProvider.model
+      : profile.model ?? undefined,
+    effort: profile.effort ?? undefined,
+    permissionMode: effectiveClaudePermissionMode(profile),
+    initialEventCursor,
+    env: access.env,
+    ...access.host,
+  };
+}
+
 /** Narrow external-engine seam for launch-path tests; production passes none. */
 export async function defaultStartHost(
   input: StructuredSpawnInput,
@@ -1649,20 +1680,7 @@ export async function defaultStartHost(
   }
   const form = structuredClaudeLaunchForm(input);
   const options = {
-    cwd: input.spec.cwd,
-    claudeProjectsDir: input.account.transcriptRoot,
-    ...claudeHostLaunchPaths(input.account),
-    allowSubagents: profile.allowSubagents,
-    mcpServers: profile.mcpServers,
-    validateTelegramGrant,
-    readOnly: launchProfileEngineReadOnly(profile),
-    restricted: profile.sandbox === "restricted",
-    model: profile.model ?? undefined,
-    effort: profile.effort ?? undefined,
-    permissionMode: effectiveClaudePermissionMode(profile),
-    initialEventCursor,
-    env,
-    ...access.host,
+    ...claudeStructuredHostOptions(input, { env, host: access.host }, initialEventCursor, validateTelegramGrant),
     ...engineProcess.claude,
   };
   return form.kind === "resume"

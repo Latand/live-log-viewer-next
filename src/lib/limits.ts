@@ -429,7 +429,9 @@ export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsRea
   const copilotAccount = listCopilotAccounts().find((account) => account.id === copilotAccountId) ?? null;
   const copilotRead = copilotAccount ? readCopilotTranscriptLimits(copilotAccount.sessionStateDir) : null;
   const [resolvedClaude, resolvedCodex] = await Promise.all([
-    resolveClaudeRead(claudeAccount, now, clock),
+    claudeAccount.provider
+      ? Promise.resolve({ data: null, meta: { source: "unavailable" as const, reason: "provider limits unknown", staleSince: null } })
+      : resolveClaudeRead(claudeAccount, now, clock),
     resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader, now: clock })),
   ]);
   return {
@@ -473,9 +475,10 @@ export type ClaudeAccountLimits = {
  * path reads, the footer shows the result.
  */
 export async function readClaudeAccountLimits(
-  account: Pick<ClaudeAccount, "id" | "home">,
+  account: Pick<ClaudeAccount, "id" | "home" | "provider">,
   options: { now?: () => number; force?: boolean } = {},
 ): Promise<ClaudeAccountLimits> {
+  if (account.provider) return { data: null, provenance: { source: "unavailable", reason: "provider limits unknown", staleSince: null }, observedAt: null };
   const clock = options.now ?? Date.now;
   const resolved = await resolveClaudeRead(account, clock(), clock, options.force);
   return { data: resolved.data, provenance: resolved.meta, observedAt: resolved.observedAt };

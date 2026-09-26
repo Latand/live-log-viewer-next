@@ -220,6 +220,8 @@ export interface ClaudeStreamBrokerHostOptions {
   permissionMode?: string;
   tools?: string[];
   env?: NodeJS.ProcessEnv;
+  /** Only the resolved provider account may forward its Anthropic endpoint. */
+  providerAccount?: boolean;
   forwardGitHubConfig?: boolean;
   releaseCleanup?: () => void;
   requestTimeoutMs?: number;
@@ -390,11 +392,18 @@ function subscriptionEnv(
   source: NodeJS.ProcessEnv,
   claudeConfigDir?: string,
   forwardGitHubConfig = false,
+  providerAccount = false,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
   for (const name of CHILD_ENV_ALLOWLIST) if (source[name] !== undefined) env[name] = source[name];
   if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+  if (providerAccount) {
+    for (const name of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"] as const) {
+      if (source[name] !== undefined) env[name] = source[name];
+    }
+    if (!env.ANTHROPIC_BASE_URL || !env.ANTHROPIC_AUTH_TOKEN || !env.ANTHROPIC_MODEL) throw new Error("Claude provider account is incomplete");
+  }
   /* The commands this agent runs resolve their own config and state root, not
      the operator's (#1905). The account home above and the Viewer MCP server's
      own environment are what keep pointing at the real installation. */
@@ -699,15 +708,18 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       options.env ?? process.env,
       options.claudeConfigDir,
       options.forwardGitHubConfig === true,
+      options.providerAccount === true,
     );
     let auth: ClaudeAuthStatus;
     try {
-      auth = await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
+      auth = options.providerAccount
+        ? { loggedIn: true, authMethod: "provider", subscriptionType: null }
+        : await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
     } catch (error) {
       options.releaseCleanup?.();
       throw error;
     }
-    if (!auth.loggedIn || auth.authMethod !== "claude.ai" || !auth.subscriptionType) {
+    if (!auth.loggedIn || (!options.providerAccount && (auth.authMethod !== "claude.ai" || !auth.subscriptionType))) {
       options.releaseCleanup?.();
       throw new Error("Claude stream hosting requires a claude.ai subscription login");
     }

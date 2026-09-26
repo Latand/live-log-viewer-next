@@ -95,6 +95,7 @@ function EngineCard({ state, cli, now, onRecheck }: { state: EngineAccountsState
       {missing ? (
         <p className="text-ui text-secondary">{t(engine === "claude" ? "onboarding.engines.missingClaude" : "onboarding.engines.missingCodex")}</p>
       ) : null}
+      {engine === "claude" && !missing ? <p className="text-ui text-secondary">{t("onboarding.engines.providerHelp")}</p> : null}
       {/* Every account the engine store knows, with its own sign-in, and the
           accounts panel's add row last (#2004): the same rows, not new UI. */}
       {loading ? null : (

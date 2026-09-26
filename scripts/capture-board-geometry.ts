@@ -909,6 +909,7 @@ function healthAnswer(state: HealthState): unknown {
 }
 
 async function captureOnboarding(): Promise<void> {
+  const providerOnly = process.env.BOARD_CAPTURE_CASE === "provider-account";
   const failures: string[] = [];
   const must = (ok: boolean, message: string) => { if (!ok) failures.push(message); };
   for (const dir of [REPO_DIR, OUT_DIR, BIN_DIR, path.join(HOME, ".claude"), path.join(BASE, "git-home"), path.join(BASE, "tmp", `claude-${process.getuid?.() ?? 1000}`), path.join(BASE, "tmux"), STATE_DIR, path.join(HOME, ".codex/sessions")]) fs.mkdirSync(dir, { recursive: true });
@@ -924,7 +925,7 @@ async function captureOnboarding(): Promise<void> {
 
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const report: Record<string, unknown> = { commit: Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoRoot }).stdout.toString().trim(), case: "onboarding" };
+  const report: Record<string, unknown> = { commit: captureCommit(), case: providerOnly ? "provider-account" : "onboarding" };
   let server: ChildProcess | null = null;
   let browser: Browser | null = null;
   const tailscale = createTailscaleStub({ root: BASE });
@@ -958,8 +959,8 @@ async function captureOnboarding(): Promise<void> {
     report.firstRunMarker = first.marker;
     browser = await chromium.launch({ executablePath: process.env.CHROME_BIN || undefined, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 
-    for (const viewport of ONBOARDING_VIEWPORTS) {
-      for (const colorScheme of ["light", "dark"] as const) {
+    for (const viewport of (providerOnly ? ONBOARDING_VIEWPORTS.filter((item) => item.width === 1280 || item.width === 390) : ONBOARDING_VIEWPORTS)) {
+      for (const colorScheme of (providerOnly ? ["light"] : ["light", "dark"]) as Array<"light" | "dark">) {
         for (const locale of ["en", "uk"] as const) {
           const tag = `${viewport.tag}-${colorScheme}-${locale}`;
           const frames: Record<string, unknown> = {};
@@ -983,6 +984,18 @@ async function captureOnboarding(): Promise<void> {
             localStorage.setItem("llvSound", "0");
           }, locale);
           const page = await context.newPage();
+          if (providerOnly) await page.route("**/api/accounts", async (route) => {
+            const response = await route.fetch();
+            const body = await response.json() as { claude?: { accounts?: Record<string, unknown>[] } };
+            body.claude?.accounts?.push({
+              id: "provider-fixture", label: "Provider", kind: "managed", authPresent: true,
+              auth: { state: "authenticated", method: "provider", email: null, plan: null, checkedAt: null },
+              loginPending: false, loginState: "authenticated", attemptState: null, deviceAuth: null,
+              limits: { state: "unavailable", session: null, weekly: null, tiers: [], checkedAt: null },
+              provider: { baseUrl: "https://opencode.ai/zen/go", model: "fixture-large", smallFastModel: "fixture-small" },
+            });
+            await route.fulfill({ response, json: body });
+          });
           const shot = async (name: string, check: (reading: NonNullable<ReturnType<typeof measureOnboarding>>) => void) => {
             await page.waitForTimeout(350);
             const reading = await page.evaluate(measureOnboarding, viewport.phone);
@@ -996,7 +1009,8 @@ async function captureOnboarding(): Promise<void> {
             for (const label of reading.roleLabels) must(!label.clipped, `${tag} ${name}: role label "${label.text}" is clipped at ${label.w}px`);
             for (const button of reading.footerButtons) must(!button.clipped && button.inside, `${tag} ${name}: footer button "${button.text}" is clipped or outside the footer`);
             must(reading.segmentOverflow <= 0, `${tag} ${name}: an engine control overflows its cell by ${reading.segmentOverflow}px`);
-            must(reading.smallTargets.length === 0, `${tag} ${name}: targets under 44px: ${reading.smallTargets.join("; ")}`);
+            if (providerOnly) report[`${tag}:${name}:otherSmallTargets`] = reading.smallTargets;
+            else must(reading.smallTargets.length === 0, `${tag} ${name}: targets under 44px: ${reading.smallTargets.join("; ")}`);
             check(reading);
           };
 
@@ -1018,6 +1032,38 @@ async function captureOnboarding(): Promise<void> {
             await shot("engines-one-connected", (r) => {
               must(r.engines.claude === "connected" && r.engines.codex === "missing", `${tag}: with a Codex credential and no Codex command the engines read ${JSON.stringify(r.engines)}`);
             });
+
+            if (providerOnly) {
+              const selector = '[data-onboarding-accounts="claude"] [data-claude-provider-editor="new"]';
+              await page.locator(`${selector} button`).first().click();
+              await page.locator(`${selector} input`).first().waitFor();
+              await page.locator(`${selector} input`).last().scrollIntoViewIfNeeded();
+              await shot("engines-provider-form", () => {});
+              const geometry = await page.locator(selector).evaluate((node) => ({
+                fields: [...node.querySelectorAll("input,button")].map((field) => {
+                  const rect = field.getBoundingClientRect();
+                  return { width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+                }),
+                overflow: node.scrollWidth - node.clientWidth,
+              }));
+              must(geometry.overflow <= 1 && geometry.fields.every((field) => field.width >= 44 && (viewport.phone ? field.height >= 44 : field.height >= 24) && field.left >= 0 && field.right <= viewport.width + 1), `${tag}: provider controls overflow or collapse: ${JSON.stringify(geometry)}`);
+              await page.locator(`${selector} button`).first().click();
+              const edit = '[data-onboarding-accounts="claude"] [data-claude-provider-editor="provider-fixture"]';
+              await page.locator(`${edit} button`).first().click();
+              await page.locator(`${edit} input`).last().scrollIntoViewIfNeeded();
+              await shot("engines-provider-edit", () => {});
+              const editGeometry = await page.locator(edit).evaluate((node) => ({
+                fields: [...node.querySelectorAll("input,button")].map((field) => {
+                  const rect = field.getBoundingClientRect();
+                  return { width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+                }),
+                overflow: node.scrollWidth - node.clientWidth,
+              }));
+              must(editGeometry.overflow <= 1 && editGeometry.fields.every((field) => field.width >= 44 && (viewport.phone ? field.height >= 44 : field.height >= 24) && field.left >= 0 && field.right <= viewport.width + 1), `${tag}: provider edit controls overflow or collapse: ${JSON.stringify(editGeometry)}`);
+              report[tag] = frames;
+              await context.close();
+              continue;
+            }
 
             /* 2. The mapping: six roles and two variants sit on Codex, which is not connected. */
             await openStep("agents");
@@ -1648,12 +1694,12 @@ async function captureOnboarding(): Promise<void> {
     process.exitCode = 1;
     console.error(`onboarding acceptance FAILED (${failures.length}):\n  ${failures.join("\n  ")}`);
   } else {
-    console.log("onboarding acceptance passed at 1440, 1280 and 390, light and dark, English and Ukrainian.");
+    console.log(providerOnly ? "provider account form rendered at 1280 and 390 in English and Ukrainian." : "onboarding acceptance passed at 1440, 1280 and 390, light and dark, English and Ukrainian.");
   }
 }
 
 async function main(): Promise<void> {
-  if (process.env.BOARD_CAPTURE_CASE === "onboarding") {
+  if (process.env.BOARD_CAPTURE_CASE === "onboarding" || process.env.BOARD_CAPTURE_CASE === "provider-account") {
     await captureOnboarding();
     return;
   }

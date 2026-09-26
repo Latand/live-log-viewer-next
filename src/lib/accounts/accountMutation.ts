@@ -370,7 +370,7 @@ export function accountMutationRevisionForTests(): number {
 /** File identity catches reauthentication that does not change the catalog.
     Only metadata is retained; credential contents never enter the registry. */
 export function accountProbeIdentity(account: { home: string }): string {
-  const files = ["auth.json", ".credentials.json"].map((name) => {
+  const files = ["auth.json", ".credentials.json", ".provider-token"].map((name) => {
     try {
       const stat = fs.statSync(path.join(account.home, name), { bigint: true });
       return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String);
